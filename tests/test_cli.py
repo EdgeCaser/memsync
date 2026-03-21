@@ -246,6 +246,7 @@ class TestCmdInit:
         sync_dir = tmp_path / "my-sync"
         sync_dir.mkdir()
 
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
         monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, dst: None)
 
         result = cmd_init(self._init_args(sync_root=str(sync_dir)), config)
@@ -260,6 +261,7 @@ class TestCmdInit:
         sync_dir = tmp_path / "sync-root"
         sync_dir.mkdir()
 
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
         monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, dst: None)
         cmd_init(self._init_args(sync_root=str(sync_dir)), config)
 
@@ -285,8 +287,9 @@ class TestCmdInit:
         # OR 0 if OneDrive is detected on this machine; just check it ran
         assert result in (0, 4)
 
-    def test_init_sync_root_nonexistent_returns_1(self, tmp_config, capsys):
+    def test_init_sync_root_nonexistent_returns_1(self, tmp_config, monkeypatch, capsys):
         config, tmp_path = tmp_config
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
         result = cmd_init(self._init_args(sync_root="/nonexistent/path/xyz"), config)
         assert result == 1
 
@@ -324,6 +327,7 @@ class TestCmdInit:
 
         def capture_save(self):
             saved_configs.append(self)
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
         monkeypatch.setattr(Config, "save", capture_save)
         monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, dst: None)
 
@@ -400,8 +404,9 @@ class TestCmdDiff:
 # ---------------------------------------------------------------------------
 
 class TestCmdConfigShow:
-    def test_returns_2_when_no_config(self, tmp_config, capsys):
+    def test_returns_2_when_no_config(self, tmp_config, monkeypatch, capsys):
         config, tmp_path = tmp_config
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
         result = cmd_config_show(_args(), config)
         assert result == 2
 
@@ -531,7 +536,7 @@ class TestCmdDoctor:
         result = cmd_doctor(_args(), config)
         out = capsys.readouterr().out
         assert result == 1
-        assert "ANTHROPIC_API_KEY" in out
+        assert "API key" in out
 
     def test_missing_memory_file_fails(self, tmp_config, monkeypatch, capsys):
         config, tmp_path = tmp_config
@@ -549,7 +554,7 @@ class TestCmdDoctor:
         cmd_doctor(_args(), config)
         out = capsys.readouterr().out
         assert "Config file" in out
-        assert "ANTHROPIC_API_KEY" in out
+        assert "API key" in out
         assert "Provider" in out
 
 

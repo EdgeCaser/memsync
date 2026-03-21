@@ -13,7 +13,6 @@ from memsync import __version__
 from memsync.backups import backup, latest_backup, list_backups, prune
 from memsync.claude_md import sync as sync_claude_md
 from memsync.config import Config, get_config_path
-from memsync.providers import all_providers, auto_detect, get_provider
 from memsync.harvest import (
     find_latest_session,
     find_project_dir,
@@ -22,7 +21,13 @@ from memsync.harvest import (
     read_session_transcript,
     save_harvested_index,
 )
-from memsync.sync import harvest_memory_content, load_or_init_memory, log_session_notes, refresh_memory_content
+from memsync.providers import all_providers, auto_detect, get_provider
+from memsync.sync import (
+    harvest_memory_content,
+    load_or_init_memory,
+    log_session_notes,
+    refresh_memory_content,
+)
 from memsync.usage import append_usage, format_summary, load_usage, usage_log_path
 
 # ---------------------------------------------------------------------------
@@ -284,7 +289,8 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     if result.get("malformed"):
         print(
             "\nError: API response does not look like a memory file (missing leading # or <!--).\n"
-            "Memory file was NOT updated. The raw response has been printed below for inspection.\n",
+            "Memory file was NOT updated. The raw response has been printed below for"
+            " inspection.\n",
             file=sys.stderr,
         )
         print(result["updated_content"], file=sys.stderr)
@@ -384,12 +390,12 @@ def _harvest_all(
 
         if result["truncated"]:
             if not args.auto:
-                print(f"truncated — skipped.")
+                print("truncated — skipped.")
             continue
 
         if result.get("malformed"):
             if not args.auto:
-                print(f"malformed response — skipped.")
+                print("malformed response — skipped.")
             errors += 1
             continue
 
@@ -410,7 +416,7 @@ def _harvest_all(
         global_memory.write_text(current_memory, encoding="utf-8")
         sync_claude_md(global_memory, config.claude_md_target)
         if not args.auto:
-            print(f"\ndone.")
+            print("\ndone.")
             print(f"  Backup:    {backup_path}")
             print(f"  Memory:    {global_memory}")
             print("  CLAUDE.md synced ✓")
@@ -538,7 +544,9 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         if result["changed"]:
             old_lines = current_memory.strip().splitlines(keepends=True)
             new_lines = result["updated_content"].splitlines(keepends=True)
-            diff = difflib.unified_diff(old_lines, new_lines, fromfile="current", tofile="harvested")
+            diff = difflib.unified_diff(
+                old_lines, new_lines, fromfile="current", tofile="harvested"
+            )
             diff_text = "".join(diff)
             if diff_text:
                 print("--- diff ---")
@@ -789,7 +797,9 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
     if config.api_key:
         api_key_detail = "set via config (recommended)"
     elif os.environ.get("ANTHROPIC_API_KEY"):
-        api_key_detail = "set via ANTHROPIC_API_KEY env var (consider: memsync config set api_key <key>)"
+        api_key_detail = (
+            "set via ANTHROPIC_API_KEY env var (consider: memsync config set api_key <key>)"
+        )
     else:
         api_key_detail = "not set — refresh will fail"
     checks.append(("API key", api_key_set, api_key_detail))
@@ -1197,7 +1207,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sweep all projects under ~/.claude/projects/ (for scheduled runs)",
     )
     p_harvest.add_argument(
-        "--project", help="Path to the ~/.claude/projects/<key> directory (default: current project)"
+        "--project",
+        help="Path to the ~/.claude/projects/<key> directory (default: current project)",
     )
     p_harvest.add_argument(
         "--session", help="Path to a specific session JSONL file (default: most recent unprocessed)"
