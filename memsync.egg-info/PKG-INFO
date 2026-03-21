@@ -1,0 +1,213 @@
+Metadata-Version: 2.4
+Name: memsync
+Version: 0.2.0
+Summary: Cross-platform global memory manager for Claude Code
+License: MIT
+Project-URL: Homepage, https://github.com/YOUR_USERNAME/memsync
+Project-URL: Issues, https://github.com/YOUR_USERNAME/memsync/issues
+Keywords: claude,claude-code,ai,memory,cli
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Operating System :: MacOS
+Classifier: Operating System :: Microsoft :: Windows
+Classifier: Operating System :: POSIX :: Linux
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: anthropic>=0.40.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0; extra == "dev"
+Requires-Dist: pytest-mock>=3.12; extra == "dev"
+Requires-Dist: ruff>=0.4; extra == "dev"
+Requires-Dist: bandit[toml]>=1.7; extra == "dev"
+Dynamic: license-file
+
+# memsync
+
+Cross-platform global memory manager for Claude Code.
+
+Claude Code has no memory between sessions. memsync fixes that: it maintains one canonical `GLOBAL_MEMORY.md` in your cloud sync folder, linked to `~/.claude/CLAUDE.md` so Claude Code reads it at every session start.
+
+After a meaningful session, run `memsync refresh --notes "..."` and the Claude API merges your notes into the memory file automatically.
+
+---
+
+## How it works
+
+```
+OneDrive/.claude-memory/
+  GLOBAL_MEMORY.md          ← source of truth, synced across all machines
+  backups/                  ← automatic backups before every refresh
+  sessions/                 ← raw session notes, append-only audit trail
+
+~/.claude/CLAUDE.md         ← symlink → GLOBAL_MEMORY.md (Mac/Linux)
+                               copy of GLOBAL_MEMORY.md (Windows)
+```
+
+Every Claude Code session starts by reading `~/.claude/CLAUDE.md`. memsync keeps it current.
+
+---
+
+## Requirements
+
+- Python 3.11+
+- An Anthropic API key (`ANTHROPIC_API_KEY` env var)
+- One of: OneDrive, iCloud Drive, Google Drive — or any folder you specify
+
+---
+
+## Installation
+
+```bash
+pip install memsync
+```
+
+---
+
+## Quick start
+
+```bash
+# 1. Initialize (auto-detects your cloud provider)
+memsync init
+
+# 2. Edit your memory file — fill in who you are, active projects, preferences
+# File is at: OneDrive/.claude-memory/GLOBAL_MEMORY.md
+
+# 3. After a Claude Code session, merge in your notes
+memsync refresh --notes "Finished the auth module. Decided to use JWT tokens, not sessions."
+
+# 4. Check everything is wired up
+memsync status
+```
+
+---
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `memsync init` | First-time setup: create directory structure, sync to CLAUDE.md |
+| `memsync refresh --notes "..."` | Merge session notes into memory via Claude API |
+| `memsync show` | Print current GLOBAL_MEMORY.md |
+| `memsync diff` | Diff current memory vs last backup |
+| `memsync status` | Show paths, provider, sync state |
+| `memsync providers` | List all providers and detection status |
+| `memsync config show` | Print current config |
+| `memsync config set <key> <value>` | Update a config value |
+| `memsync prune` | Remove old backups |
+
+### `memsync refresh` options
+
+```bash
+memsync refresh --notes "inline notes"
+memsync refresh --file notes.txt
+echo "notes" | memsync refresh
+memsync refresh --notes "..." --dry-run      # preview changes, no write
+memsync refresh --notes "..." --model claude-opus-4-20250514  # one-off model override
+```
+
+### `memsync init` options
+
+```bash
+memsync init                          # auto-detect provider
+memsync init --provider icloud        # use a specific provider
+memsync init --sync-root /path/to/folder  # use a custom path
+memsync init --force                  # reinitialize even if already set up
+```
+
+### `memsync config set` keys
+
+```bash
+memsync config set provider icloud
+memsync config set model claude-opus-4-20250514
+memsync config set sync_root /path/to/custom/folder
+memsync config set keep_days 60
+memsync config set max_memory_lines 300
+memsync config set claude_md_target ~/.claude/CLAUDE.md
+```
+
+---
+
+## Cloud providers
+
+| Provider | macOS | Windows | Linux |
+|---|---|---|---|
+| OneDrive | ✓ | ✓ | ✓ (rclone) |
+| iCloud Drive | ✓ | ✓ | ✗ |
+| Google Drive | ✓ | ✓ | ✓ (rclone) |
+| Custom path | ✓ | ✓ | ✓ |
+
+Detection is automatic. If multiple providers are found during `memsync init`, you'll be prompted to choose.
+
+**Windows note:** Symlinks require admin rights or Developer Mode on Windows. memsync copies `GLOBAL_MEMORY.md` to `~/.claude/CLAUDE.md` instead. The copy is refreshed on every `memsync refresh`.
+
+**iCloud note:** iCloud Drive doesn't sync dot-folders on Mac. memsync stores data in `claude-memory/` (no leading dot) when using the iCloud provider.
+
+---
+
+## Configuration
+
+Config file location:
+- macOS/Linux: `~/.config/memsync/config.toml`
+- Windows: `%APPDATA%\memsync\config.toml`
+
+Config is machine-specific — two machines can use different providers pointing to the same cloud storage location.
+
+Example config:
+
+```toml
+[core]
+provider = "onedrive"
+model = "claude-sonnet-4-20250514"
+max_memory_lines = 400
+
+[paths]
+claude_md_target = "/Users/ian/.claude/CLAUDE.md"
+
+[backups]
+keep_days = 30
+```
+
+To update the model when Anthropic releases new ones:
+
+```bash
+memsync config set model claude-sonnet-4-20250514
+```
+
+---
+
+## What belongs in GLOBAL_MEMORY.md
+
+The memory file is your **identity layer** — not a knowledge base, not project docs.
+
+Good things to include:
+- Who you are, your roles, active projects
+- Current priorities and focus
+- Standing preferences (communication style, output format)
+- Hard constraints (rules that must never be softened through compaction)
+
+See `docs/global-memory-guide.md` for a complete guide.
+
+---
+
+## Known limitations
+
+- **Concurrent writes:** Running `memsync refresh` on two machines simultaneously will result in the last write winning. The losing write's backup is in `backups/`. Risk is low since refresh is a deliberate manual action.
+- **Max memory size:** The memory file is kept under ~400 lines. Very dense files may hit the 4096 token response limit — reduce the file size if you see truncation errors.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). To add a new cloud provider, see [docs/adding-a-provider.md](docs/adding-a-provider.md).
+
+---
+
+## License
+
+MIT
