@@ -23,9 +23,10 @@ def cwd_to_project_key(cwd: Path) -> str:
       C:\\Users\\Ian\\foo      →  C--Users-Ian-foo
     """
     if platform.system() == "Windows":
-        # Drive letter colon becomes nothing; backslashes become dashes
+        # Drive letter colon becomes a dash; backslashes become dashes
+        # e.g. C:\Users\Ian\foo → C--Users-Ian-foo
         raw = str(cwd.resolve())
-        return raw.replace(":", "").replace("\\", "-")
+        return raw.replace(":", "-").replace("\\", "-")
     return str(cwd.resolve()).replace("/", "-")
 
 
