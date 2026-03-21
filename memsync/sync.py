@@ -24,6 +24,65 @@ YOUR JOB:
 
 RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
 
+# Harvest prompt: reads a full session transcript and extracts what's worth keeping.
+# Deliberately separate from SYSTEM_PROMPT — different task, different tuning surface.
+HARVEST_SYSTEM_PROMPT = """You are maintaining a persistent global memory file for an AI assistant user.
+This file is loaded at the start of every Claude Code session, on every machine and project.
+It is the user's identity layer — not project docs, not cold storage.
+
+Read the conversation transcript below and extract facts worth adding to persistent memory:
+- Decisions made, approaches chosen, or things agreed upon
+- Work completed, milestones reached, or features shipped
+- Problems solved and how they were resolved
+- Preferences or constraints the user expressed
+- Project or priority status changes
+- Anything the user would want to know in a future session
+
+Then merge those extractions into the existing memory file:
+- Keep the file tight (under 400 lines)
+- Update facts that have changed
+- Demote completed items from "Current priorities" to a brief "Recent completions" section
+- Preserve the user's exact voice, formatting, and section structure
+- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- If the conversation contained nothing worth persisting, return the file UNCHANGED
+
+RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
+
+
+def harvest_memory_content(transcript: str, current_memory: str, config: Config) -> dict:
+    """
+    Call the Claude API to extract memories from a session transcript and merge
+    them into current_memory.
+    Returns a dict with keys: updated_content (str), changed (bool), truncated (bool).
+    Does NOT write files — caller handles I/O.
+    """
+    client = anthropic.Anthropic()
+
+    user_prompt = f"""\
+CURRENT GLOBAL MEMORY:
+{current_memory}
+
+SESSION TRANSCRIPT:
+{transcript}"""
+
+    response = client.messages.create(
+        model=config.model,
+        max_tokens=4096,
+        system=HARVEST_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    updated_content = response.content[0].text.strip()
+    updated_content = enforce_hard_constraints(current_memory, updated_content)
+    changed = updated_content != current_memory.strip()
+    truncated = response.stop_reason == "max_tokens"
+
+    return {
+        "updated_content": updated_content,
+        "changed": changed,
+        "truncated": truncated,
+    }
+
 
 def refresh_memory_content(notes: str, current_memory: str, config: Config) -> dict:
     """

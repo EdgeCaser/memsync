@@ -39,6 +39,13 @@ class DaemonConfig:
     capture_port: int = 5001
     capture_token: str = ""                    # empty = no auth
 
+    # Nightly harvest — sweeps ~/.claude/projects/ for new session transcripts
+    harvest_enabled: bool = True
+    harvest_schedule: str = "0 2 * * *"        # 2am daily
+    harvest_projects_dir: str = ""             # empty = ~/.claude/projects (default)
+                                               # set to a custom path on Pi/servers that
+                                               # don't have Claude Code installed locally
+
     # Drift detection
     drift_check_enabled: bool = True
     drift_check_interval_hours: int = 6
@@ -94,6 +101,9 @@ def _from_dict(cls, raw: dict) -> "Config":
         capture_enabled=daemon_raw.get("capture_enabled", True),
         capture_port=daemon_raw.get("capture_port", 5001),
         capture_token=daemon_raw.get("capture_token", ""),
+        harvest_enabled=daemon_raw.get("harvest_enabled", True),
+        harvest_schedule=daemon_raw.get("harvest_schedule", "0 2 * * *"),
+        harvest_projects_dir=daemon_raw.get("harvest_projects_dir", ""),
         drift_check_enabled=daemon_raw.get("drift_check_enabled", True),
         drift_check_interval_hours=daemon_raw.get("drift_check_interval_hours", 6),
         drift_notify=daemon_raw.get("drift_notify", "log"),
@@ -140,6 +150,9 @@ def _to_toml(self) -> str:
             f"capture_enabled = {str(self.daemon.capture_enabled).lower()}",
             f"capture_port = {self.daemon.capture_port}",
             f'capture_token = "{self.daemon.capture_token}"',
+            f"harvest_enabled = {str(self.daemon.harvest_enabled).lower()}",
+            f'harvest_schedule = "{self.daemon.harvest_schedule}"',
+            f'harvest_projects_dir = "{self.daemon.harvest_projects_dir}"',
             f"drift_check_enabled = {str(self.daemon.drift_check_enabled).lower()}",
             f"drift_check_interval_hours = {self.daemon.drift_check_interval_hours}",
             f'drift_notify = "{self.daemon.drift_notify}"',

@@ -14,7 +14,14 @@ from memsync.backups import backup, latest_backup, list_backups, prune
 from memsync.claude_md import sync as sync_claude_md
 from memsync.config import Config, get_config_path
 from memsync.providers import all_providers, auto_detect, get_provider
-from memsync.sync import load_or_init_memory, log_session_notes, refresh_memory_content
+from memsync.harvest import (
+    find_latest_session,
+    find_project_dir,
+    load_harvested_index,
+    read_session_transcript,
+    save_harvested_index,
+)
+from memsync.sync import harvest_memory_content, load_or_init_memory, log_session_notes, refresh_memory_content
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -277,6 +284,148 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     print(f"  Backup:    {backup_path}")
     print(f"  Memory:    {global_memory}")
     print("  CLAUDE.md synced ✓")
+    return 0
+
+
+def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
+    """Extract memories from a Claude Code session transcript."""
+    import datetime
+
+    # Resolve memory root
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+
+    global_memory = memory_root / "GLOBAL_MEMORY.md"
+    if not global_memory.exists():
+        print(
+            "Error: GLOBAL_MEMORY.md not found. Run 'memsync init' first.",
+            file=sys.stderr,
+        )
+        return 3
+
+    # Resolve project dir
+    if args.project:
+        project_dir = Path(args.project).expanduser()
+        if not project_dir.exists():
+            print(f"Error: project path does not exist: {args.project}", file=sys.stderr)
+            return 1
+    else:
+        project_dir = find_project_dir(Path.cwd())
+        if project_dir is None:
+            print(
+                "Error: no Claude Code session directory found for this project.\n"
+                "Try specifying a path with: memsync harvest --project ~/.claude/projects/<key>",
+                file=sys.stderr,
+            )
+            return 4
+
+    # Load harvest index
+    harvested = load_harvested_index(memory_root)
+
+    # Resolve session file
+    if args.session:
+        session_path = Path(args.session).expanduser()
+        if not session_path.exists():
+            print(f"Error: session file not found: {args.session}", file=sys.stderr)
+            return 1
+    else:
+        session_path = find_latest_session(
+            project_dir,
+            exclude=None if args.force else harvested,
+        )
+        if session_path is None:
+            if args.auto:
+                return 0  # Silent success — nothing to do
+            print("No new sessions to harvest. Use --force to re-harvest the latest.")
+            return 0
+
+    # Parse transcript
+    transcript, message_count = read_session_transcript(session_path)
+    if not transcript.strip():
+        if args.auto:
+            return 0
+        print("Session transcript is empty — nothing to harvest.")
+        return 0
+
+    # Confirmation prompt (skipped in --auto mode)
+    if not args.auto:
+        mtime = datetime.datetime.fromtimestamp(session_path.stat().st_mtime)
+        mtime_str = mtime.strftime("%Y-%m-%d %H:%M")
+        print(f"Session: {session_path.stem}")
+        print(f"Date:     {mtime_str}")
+        print(f"Messages: {message_count}")
+        answer = input("Harvest this session? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Aborted.")
+            return 0
+
+    # Allow one-off model override
+    if args.model:
+        config = dataclasses.replace(config, model=args.model)
+
+    current_memory = load_or_init_memory(global_memory)
+
+    if not args.auto:
+        print("Harvesting session...", end=" ", flush=True)
+
+    try:
+        result = harvest_memory_content(transcript, current_memory, config)
+    except anthropic.BadRequestError as e:
+        if "model" in str(e).lower():
+            print(
+                f"\nError: model '{config.model}' may be unavailable or misspelled.\n"
+                f"Update with: memsync config set model <model-id>",
+                file=sys.stderr,
+            )
+            return 5
+        raise
+    except anthropic.APIError as e:
+        print(f"\nError: API request failed: {e}", file=sys.stderr)
+        return 5
+
+    if args.dry_run:
+        import difflib
+        print("\n[DRY RUN] No files written.\n")
+        if result["changed"]:
+            old_lines = current_memory.strip().splitlines(keepends=True)
+            new_lines = result["updated_content"].splitlines(keepends=True)
+            diff = difflib.unified_diff(old_lines, new_lines, fromfile="current", tofile="harvested")
+            diff_text = "".join(diff)
+            if diff_text:
+                print("--- diff ---")
+                print(diff_text)
+        else:
+            print("No changes detected.")
+        return 0
+
+    if result["truncated"]:
+        print(
+            "\nError: API response was truncated (hit max_tokens limit).\n"
+            "Memory file was NOT updated.",
+            file=sys.stderr,
+        )
+        return 5
+
+    # Mark session as harvested regardless of whether memory changed
+    harvested.add(session_path.stem)
+    save_harvested_index(memory_root, harvested)
+
+    if not result["changed"]:
+        if not args.auto:
+            print("no changes.")
+        return 0
+
+    backup_path = backup(global_memory, memory_root / "backups")
+    global_memory.write_text(result["updated_content"], encoding="utf-8")
+    sync_claude_md(global_memory, config.claude_md_target)
+
+    if not args.auto:
+        print("done.")
+        print(f"  Backup:    {backup_path}")
+        print(f"  Memory:    {global_memory}")
+        print("  CLAUDE.md synced ✓")
+
     return 0
 
 
@@ -858,6 +1007,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_refresh.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
     p_refresh.add_argument("--model", help="One-off model override (doesn't change config)")
     p_refresh.set_defaults(func=cmd_refresh)
+
+    # harvest
+    p_harvest = subparsers.add_parser(
+        "harvest",
+        help="Extract memories from a Claude Code session transcript",
+    )
+    p_harvest.add_argument(
+        "--project", help="Path to the ~/.claude/projects/<key> directory (default: current project)"
+    )
+    p_harvest.add_argument(
+        "--session", help="Path to a specific session JSONL file (default: most recent unprocessed)"
+    )
+    p_harvest.add_argument(
+        "--auto", action="store_true",
+        help="Skip confirmation prompt and run silently (for hook use)",
+    )
+    p_harvest.add_argument(
+        "--force", action="store_true",
+        help="Re-harvest even if this session has already been processed",
+    )
+    p_harvest.add_argument(
+        "--dry-run", action="store_true", help="Preview changes without writing"
+    )
+    p_harvest.add_argument("--model", help="One-off model override (doesn't change config)")
+    p_harvest.set_defaults(func=cmd_harvest)
 
     # show
     p_show = subparsers.add_parser("show", help="Print current global memory")
