@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memsync"
+version = "0.2.0"
+description = "Cross-platform global memory manager for Claude Code"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = ["claude", "claude-code", "ai", "memory", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "anthropic>=0.40.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/memsync"
+Issues = "https://github.com/YOUR_USERNAME/memsync/issues"
+
+[project.scripts]
+memsync = "memsync.cli:main"
+
+[project.optional-dependencies]
+daemon = [
+    "apscheduler>=3.10",
+    "flask>=3.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-mock>=3.12",
+    "ruff>=0.4",
+    "bandit[toml]>=1.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["memsync*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "smoke: fast read-only checks — run any time, no API calls, no filesystem writes",
+]
+addopts = "--cov=memsync --cov-fail-under=80 --cov-report=term-missing"
+
+[tool.coverage.run]
+omit = [
+    "memsync/daemon/service.py",   # requires systemd/launchd — OS-specific privileged ops
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "S",   # flake8-bandit (security)
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "S101",   # assert used — acceptable in tests
+    "S603",   # subprocess — not used here but avoid false positives
+    "S607",   # subprocess partial path — not used here
+    "B008",   # do not perform function calls in default arguments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S106"]   # asserts and hardcoded passwords OK in tests
+
+[tool.bandit]
+targets = ["memsync"]
+skips = [
+    "B101",   # assert_used — we don't use asserts in production code
+    "B608",   # hardcoded_sql_expressions — false positive on error message strings; no SQL in codebase
+]
+exclude_dirs = ["tests"]
