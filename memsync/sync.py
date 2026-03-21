@@ -56,7 +56,7 @@ def harvest_memory_content(transcript: str, current_memory: str, config: Config)
     Returns a dict with keys: updated_content (str), changed (bool), truncated (bool).
     Does NOT write files — caller handles I/O.
     """
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=config.api_key or None)
 
     user_prompt = f"""\
 CURRENT GLOBAL MEMORY:
@@ -109,7 +109,7 @@ def refresh_memory_content(notes: str, current_memory: str, config: Config) -> d
     Returns a dict with keys: updated_content (str), changed (bool), malformed (bool).
     Does NOT write files — caller handles I/O.
     """
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=config.api_key or None)
 
     user_prompt = f"""\
 CURRENT GLOBAL MEMORY:
