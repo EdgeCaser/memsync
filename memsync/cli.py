@@ -270,6 +270,15 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         )
         return 5
 
+    if result.get("malformed"):
+        print(
+            "\nError: API response does not look like a memory file (missing leading # or <!--).\n"
+            "Memory file was NOT updated. The raw response has been printed below for inspection.\n",
+            file=sys.stderr,
+        )
+        print(result["updated_content"], file=sys.stderr)
+        return 6
+
     if not result["changed"]:
         print("no changes.")
         return 0
@@ -406,6 +415,14 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
             file=sys.stderr,
         )
         return 5
+
+    if result.get("malformed"):
+        print(
+            "\nError: API response does not look like a memory file (missing leading # or <!--).\n"
+            "Memory file was NOT updated.",
+            file=sys.stderr,
+        )
+        return 6
 
     # Mark session as harvested regardless of whether memory changed
     harvested.add(session_path.stem)

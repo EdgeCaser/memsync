@@ -73,6 +73,15 @@ SESSION TRANSCRIPT:
     )
 
     updated_content = response.content[0].text.strip()
+
+    if not _looks_like_memory_file(updated_content):
+        return {
+            "updated_content": updated_content,
+            "changed": False,
+            "truncated": False,
+            "malformed": True,
+        }
+
     updated_content = enforce_hard_constraints(current_memory, updated_content)
     changed = updated_content != current_memory.strip()
     truncated = response.stop_reason == "max_tokens"
@@ -81,13 +90,23 @@ SESSION TRANSCRIPT:
         "updated_content": updated_content,
         "changed": changed,
         "truncated": truncated,
+        "malformed": False,
     }
+
+
+def _looks_like_memory_file(content: str) -> bool:
+    """
+    Sanity-check that the model returned a memory file, not a narrative response.
+    A valid response starts with a markdown heading or the memsync comment marker.
+    """
+    first_line = content.lstrip().splitlines()[0] if content.strip() else ""
+    return first_line.startswith("#") or first_line.startswith("<!--")
 
 
 def refresh_memory_content(notes: str, current_memory: str, config: Config) -> dict:
     """
     Call the Claude API to merge notes into current_memory.
-    Returns a dict with keys: updated_content (str), changed (bool).
+    Returns a dict with keys: updated_content (str), changed (bool), malformed (bool).
     Does NOT write files — caller handles I/O.
     """
     client = anthropic.Anthropic()
@@ -108,6 +127,17 @@ SESSION NOTES:
 
     updated_content = response.content[0].text.strip()
 
+    # Reject responses that look like narrative explanations rather than a memory file.
+    # The model occasionally ignores "no preamble" and returns prose — writing that
+    # verbatim would corrupt GLOBAL_MEMORY.md.
+    if not _looks_like_memory_file(updated_content):
+        return {
+            "updated_content": updated_content,
+            "changed": False,
+            "truncated": False,
+            "malformed": True,
+        }
+
     # Enforce hard constraints in code — model can silently drop them (PITFALLS #1)
     updated_content = enforce_hard_constraints(current_memory, updated_content)
 
@@ -120,6 +150,7 @@ SESSION NOTES:
         "updated_content": updated_content,
         "changed": changed,
         "truncated": truncated,
+        "malformed": False,
     }
 
 
