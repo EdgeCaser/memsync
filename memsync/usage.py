@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Pricing per million tokens: (prefix, input_$/MTok, output_$/MTok)
@@ -49,7 +49,7 @@ def append_usage(
 ) -> None:
     """Append one usage record to usage.jsonl (synced, append-only)."""
     entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "machine": socket.gethostname(),
         "command": command,
         "model": model,
@@ -84,7 +84,7 @@ def format_summary(entries: list[dict]) -> str:
     if not entries:
         return "No usage recorded yet."
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     this_month = now.strftime("%Y-%m")
     month_entries = [e for e in entries if e.get("ts", "").startswith(this_month)]
 
