@@ -72,7 +72,7 @@ SESSION TRANSCRIPT:
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    updated_content = response.content[0].text.strip()
+    updated_content = _strip_code_fences(response.content[0].text)
 
     if not _looks_like_memory_file(updated_content):
         return {
@@ -96,6 +96,23 @@ SESSION TRANSCRIPT:
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
     }
+
+
+def _strip_code_fences(content: str) -> str:
+    """
+    Strip leading/trailing code fences the model sometimes wraps responses in.
+    Handles ```markdown, ```md, or plain ``` openings.
+    """
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        # Remove opening fence line (e.g. ```markdown)
+        lines = lines[1:]
+        # Remove closing fence if present
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+    return stripped
 
 
 def _looks_like_memory_file(content: str) -> bool:
@@ -129,7 +146,7 @@ SESSION NOTES:
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    updated_content = response.content[0].text.strip()
+    updated_content = _strip_code_fences(response.content[0].text)
 
     # Reject responses that look like narrative explanations rather than a memory file.
     # The model occasionally ignores "no preamble" and returns prose — writing that
