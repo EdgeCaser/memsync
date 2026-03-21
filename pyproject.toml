@@ -26,8 +26,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/memsync"
-Issues = "https://github.com/YOUR_USERNAME/memsync/issues"
+Homepage = "https://github.com/EdgeCaser/memsync"
+Issues = "https://github.com/EdgeCaser/memsync/issues"
 
 [project.scripts]
 memsync = "memsync.cli:main"

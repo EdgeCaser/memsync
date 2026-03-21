@@ -31,6 +31,17 @@ env/
 # macOS
 .DS_Store
 
+# Windows
+Thumbs.db
+
+# Logs
+*.log
+
+# memsync runtime data — never commit user data or usage logs
+usage.jsonl
+harvested.json
+*.claude-memory/
+
 # Editor
 .idea/
 .vscode/
