@@ -734,10 +734,15 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
     config_path = get_config_path()
     checks.append(("Config file", config_path.exists(), str(config_path)))
 
-    # 2. ANTHROPIC_API_KEY set
-    api_key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    api_key_detail = "(set)" if api_key_set else "not set — refresh will fail"
-    checks.append(("ANTHROPIC_API_KEY", api_key_set, api_key_detail))
+    # 2. API key — prefer config over environment variable
+    api_key_set = bool(config.api_key) or bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if config.api_key:
+        api_key_detail = "set via config (recommended)"
+    elif os.environ.get("ANTHROPIC_API_KEY"):
+        api_key_detail = "set via ANTHROPIC_API_KEY env var (consider: memsync config set api_key <key>)"
+    else:
+        api_key_detail = "not set — refresh will fail"
+    checks.append(("API key", api_key_set, api_key_detail))
 
     # 3. Provider / sync root accessible
     if config.sync_root:
@@ -810,6 +815,7 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     valid_keys = {
         "provider", "model", "sync_root", "claude_md_target", "max_memory_lines", "keep_days",
+        "api_key",
     }
     if key not in valid_keys:
         print(
@@ -854,6 +860,9 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "model":
         config = dataclasses.replace(config, model=value)
+
+    elif key == "api_key":
+        config = dataclasses.replace(config, api_key=value)
 
     config.save()
     print(f"Set {key} = {value}")

@@ -62,6 +62,7 @@ class Config:
     provider: str = "onedrive"
     model: str = "claude-sonnet-4-20250514"
     max_memory_lines: int = 400
+    api_key: str = ""           # stored in config.toml (AppData), not in env
 
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
@@ -130,6 +131,7 @@ class Config:
             provider=core.get("provider", "onedrive"),
             model=core.get("model", "claude-sonnet-4-20250514"),
             max_memory_lines=core.get("max_memory_lines", 400),
+            api_key=core.get("api_key", ""),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -156,6 +158,10 @@ class Config:
             f'provider = "{self.provider}"',
             f'model = "{self.model}"',
             f"max_memory_lines = {self.max_memory_lines}",
+        ]
+        if self.api_key:
+            lines.append(f'api_key = "{self.api_key}"')
+        lines += [
             "",
             "[paths]",
             f'claude_md_target = "{self.claude_md_target.as_posix()}"',
