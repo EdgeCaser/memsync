@@ -40,6 +40,11 @@ class DaemonConfig:
     drift_check_interval_hours: int = 6
     drift_notify: str = "log"                   # "log", "email", or "file"
 
+    # Nightly harvest — sweeps ~/.claude/projects/ and extracts memories from session transcripts
+    harvest_enabled: bool = True
+    harvest_schedule: str = "0 2 * * *"            # 2am daily
+    harvest_projects_dir: str = ""                  # empty = ~/.claude/projects (default)
+
     # Weekly digest email
     digest_enabled: bool = False
     digest_schedule: str = "0 9 * * 1"         # Monday 9am
@@ -108,6 +113,9 @@ class Config:
             drift_check_enabled=daemon_raw.get("drift_check_enabled", True),
             drift_check_interval_hours=daemon_raw.get("drift_check_interval_hours", 6),
             drift_notify=daemon_raw.get("drift_notify", "log"),
+            harvest_enabled=daemon_raw.get("harvest_enabled", True),
+            harvest_schedule=daemon_raw.get("harvest_schedule", "0 2 * * *"),
+            harvest_projects_dir=daemon_raw.get("harvest_projects_dir", ""),
             digest_enabled=daemon_raw.get("digest_enabled", False),
             digest_schedule=daemon_raw.get("digest_schedule", "0 9 * * 1"),
             digest_email_to=daemon_raw.get("digest_email_to", ""),
@@ -181,6 +189,9 @@ class Config:
                 f"drift_check_enabled = {str(d.drift_check_enabled).lower()}",
                 f"drift_check_interval_hours = {d.drift_check_interval_hours}",
                 f'drift_notify = "{d.drift_notify}"',
+                f"harvest_enabled = {str(d.harvest_enabled).lower()}",
+                f'harvest_schedule = "{d.harvest_schedule}"',
+                f'harvest_projects_dir = "{d.harvest_projects_dir}"',
                 f"digest_enabled = {str(d.digest_enabled).lower()}",
                 f'digest_schedule = "{d.digest_schedule}"',
                 f'digest_email_to = "{d.digest_email_to}"',

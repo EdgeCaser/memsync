@@ -5,7 +5,8 @@
 ```
 memsync
 ├── init              Set up memory structure for the first time
-├── refresh           Merge session notes into global memory
+├── harvest           Extract memories from a Claude Code session transcript
+├── refresh           Merge explicit session notes into global memory
 ├── show              Print current GLOBAL_MEMORY.md
 ├── diff              Diff current memory vs last backup
 ├── status            Show paths, provider, sync state
@@ -53,6 +54,50 @@ memsync initialized.
 Next: edit your memory file, then run:
   memsync refresh --notes "initial setup complete"
 ```
+
+---
+
+## `memsync harvest`
+
+**Purpose:** Read a Claude Code session transcript and extract what's worth adding to
+GLOBAL_MEMORY.md. No notes required — memsync reads the session directly.
+
+**Args:**
+- `--project <path>` — path to a `~/.claude/projects/<key>` directory (default: current working directory's project)
+- `--session <path>` — path to a specific `.jsonl` session file (default: most recent unprocessed)
+- `--auto` — skip confirmation prompt, run silently (for daemon or hook use)
+- `--force` — re-harvest even if this session is already in `harvested.json`
+- `--dry-run` — show what would change without writing
+- `--model <id>` — one-off model override
+
+**Behavior:**
+1. Resolve the project directory from cwd (or `--project`)
+2. Load `harvested.json` from memory root — the index of already-processed sessions
+3. Find the most recent session JSONL not yet in the index (or use `--session`)
+4. Parse the JSONL: extract human-typed messages and assistant text; skip tool calls, tool results, thinking blocks, and internal records
+5. If not `--auto`, show session info and prompt to confirm
+6. Call Claude API with a transcript-extraction prompt and current memory
+7. Enforce hard constraints (same as refresh)
+8. If changed and not dry-run: backup → write → sync CLAUDE.md
+9. Mark session as harvested in `harvested.json` regardless of whether memory changed
+
+**Output (interactive):**
+```
+Session: 3824abec-0413-4e88-97c2-4c90544fa560
+Date:     2026-03-21 21:10
+Messages: 18
+Harvest this session? [y/N] y
+Harvesting session... done.
+  Backup:    /Users/ian/OneDrive/.claude-memory/backups/GLOBAL_MEMORY_20260321_220000.md
+  Memory:    /Users/ian/OneDrive/.claude-memory/GLOBAL_MEMORY.md
+  CLAUDE.md synced ✓
+```
+
+**Output (--auto, no changes):** silent, exits 0.
+
+**harvested.json:** Stored in the memory root (synced via cloud). Contains a sorted list
+of session UUIDs that have already been processed. Prevents re-harvesting the same session
+on the next run.
 
 ---
 

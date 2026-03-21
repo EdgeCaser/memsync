@@ -13,14 +13,22 @@ After a meaningful session, run `memsync refresh --notes "..."` and the Claude A
 ```
 OneDrive/.claude-memory/
   GLOBAL_MEMORY.md          ← source of truth, synced across all machines
-  backups/                  ← automatic backups before every refresh
+  backups/                  ← automatic backups before every write
   sessions/                 ← raw session notes, append-only audit trail
+  harvested.json            ← index of Claude Code sessions already harvested
 
 ~/.claude/CLAUDE.md         ← symlink → GLOBAL_MEMORY.md (Mac/Linux)
                                copy of GLOBAL_MEMORY.md (Windows)
+
+~/.claude/projects/<key>/   ← Claude Code session transcripts (machine-local)
+  <uuid>.jsonl
 ```
 
 Every Claude Code session starts by reading `~/.claude/CLAUDE.md`. memsync keeps it current.
+
+Memory is updated two ways:
+- **`memsync harvest`** — reads Claude Code's session transcript directly and extracts what's worth remembering. No notes required from you.
+- **`memsync refresh --notes "..."`** — you tell it what to remember. Use this for deliberate captures or non-Claude-Code work.
 
 ---
 
@@ -49,8 +57,11 @@ memsync init
 # 2. Edit your memory file — fill in who you are, active projects, preferences
 # File is at: OneDrive/.claude-memory/GLOBAL_MEMORY.md
 
-# 3. After a Claude Code session, merge in your notes
-memsync refresh --notes "Finished the auth module. Decided to use JWT tokens, not sessions."
+# 3. After a Claude Code session, let memsync read the transcript automatically
+memsync harvest
+
+# Or tell it explicitly what to remember
+memsync refresh --notes "Decided to use JWT tokens instead of sessions."
 
 # 4. Check everything is wired up
 memsync status
@@ -63,7 +74,8 @@ memsync status
 | Command | Description |
 |---|---|
 | `memsync init` | First-time setup: create directory structure, sync to CLAUDE.md |
-| `memsync refresh --notes "..."` | Merge session notes into memory via Claude API |
+| `memsync harvest` | Extract memories from a Claude Code session transcript |
+| `memsync refresh --notes "..."` | Merge explicit notes into memory via Claude API |
 | `memsync show` | Print current GLOBAL_MEMORY.md |
 | `memsync diff` | Diff current memory vs last backup |
 | `memsync status` | Show paths, provider, sync state |
@@ -71,6 +83,17 @@ memsync status
 | `memsync config show` | Print current config |
 | `memsync config set <key> <value>` | Update a config value |
 | `memsync prune` | Remove old backups |
+
+### `memsync harvest` options
+
+```bash
+memsync harvest                        # prompt to confirm, then harvest latest session
+memsync harvest --dry-run              # preview what would change, no write
+memsync harvest --auto                 # skip prompt, silent (for daemon/hook use)
+memsync harvest --force                # re-harvest even if already processed
+memsync harvest --session path/to.jsonl  # harvest a specific session file
+memsync harvest --project ~/.claude/projects/<key>  # harvest from a specific project dir
+```
 
 ### `memsync refresh` options
 
@@ -166,10 +189,30 @@ See `docs/global-memory-guide.md` for a complete guide.
 
 ---
 
+## Automation with the daemon
+
+The daemon runs two nightly jobs so you don't have to think about it:
+- **2:00am — harvest**: reads your Claude Code sessions from today and extracts memories automatically.
+- **11:55pm — refresh**: merges notes captured via the mobile endpoint.
+
+```bash
+pip3 install 'memsync[daemon]'   # note: quotes required on Mac/zsh
+memsync daemon start --detach    # start now
+```
+
+For auto-start on boot and full setup instructions for each platform, see [`docs/DAEMON_SETUP.md`](docs/DAEMON_SETUP.md):
+- **Mac** — launchd (auto-start at login)
+- **Windows** — Task Scheduler (auto-start at login)
+- **Linux** — systemd (auto-start at boot)
+- **Raspberry Pi** — full 24/7 setup guide
+
+---
+
 ## Known limitations
 
-- **Concurrent writes:** Running `memsync refresh` on two machines simultaneously will result in the last write winning. The losing write's backup is in `backups/`. Risk is low since refresh is a deliberate manual action.
+- **Concurrent writes:** Running `memsync refresh` or `memsync harvest` on two machines simultaneously results in the last write winning. The losing write's backup is in `backups/`. Risk is low since writes are infrequent.
 - **Max memory size:** The memory file is kept under ~400 lines. Very dense files may hit the 4096 token response limit — reduce the file size if you see truncation errors.
+- **Harvest reads local sessions only:** `~/.claude/projects/` is machine-local and not synced. The nightly harvest job runs on whichever machine has the session files. On machines without Claude Code (e.g. a Pi), the harvest job skips silently.
 
 ---
 

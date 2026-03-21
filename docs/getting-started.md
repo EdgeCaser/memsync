@@ -21,9 +21,9 @@ memsync solves this by:
 
 1. Storing one canonical memory file in your cloud sync folder (OneDrive, iCloud, Google Drive)
 2. Keeping `~/.claude/CLAUDE.md` in sync with that file automatically
-3. Using the Claude API to intelligently merge your session notes into the memory file
+3. Using the Claude API to update the memory file — either by reading your session transcript directly, or by merging notes you provide
 
-After a good session you run one command and the memory updates itself.
+After a session, run `memsync harvest` and memsync reads what happened and updates the memory file itself.
 
 ---
 
@@ -331,54 +331,69 @@ This checks each component and tells you exactly what's wrong if something isn't
 
 ## Your daily workflow
 
-Once set up, using memsync takes about 30 seconds at the end of a session.
+Once set up, updating your memory takes one command at the end of a session.
 
-### After a productive session
+### Option 1: Let memsync read the session (recommended)
 
-At the end of a Claude Code session where something important happened — a decision was made, a problem was solved, a preference was discovered — run:
+`memsync harvest` reads Claude Code's session transcript directly — the actual
+conversation — and extracts what's worth remembering. You don't need to write notes.
+
+```bash
+memsync harvest
+```
+
+It will show you the session details and ask to confirm:
+
+```
+Session: 3824abec-0413-4e88-97c2-4c90544fa560
+Date:     2026-03-21 21:10
+Messages: 18
+Harvest this session? [y/N] y
+Harvesting session... done.
+  Backup:    /Users/jamie/OneDrive/.claude-memory/backups/GLOBAL_MEMORY_20260321_220000.md
+  Memory:    /Users/jamie/OneDrive/.claude-memory/GLOBAL_MEMORY.md
+  CLAUDE.md synced ✓
+```
+
+memsync keeps track of which sessions it has already harvested, so running it again
+won't duplicate anything. Use `--force` to re-harvest if needed.
+
+### Option 2: Tell it what to remember
+
+If you want to explicitly encode something — a decision made outside a Claude Code session,
+a preference you've discovered, or something you want to make sure doesn't get missed:
 
 ```bash
 memsync refresh --notes "What happened in this session"
 ```
 
-Your notes can be as brief or as detailed as you want. Examples:
+Examples:
 
 ```bash
-memsync refresh --notes "Finished the auth module. Decided to use JWT tokens instead of sessions — simpler for our use case."
+memsync refresh --notes "Decided to use JWT tokens instead of sessions — simpler for our use case."
 
-memsync refresh --notes "Discovered that the CSV parser breaks on files with Windows line endings. Fixed it with universal newlines mode."
+memsync refresh --notes "Discovered that the CSV parser breaks on files with Windows line endings. Fixed with universal newlines mode."
 
-memsync refresh --notes "Switched from Flask to FastAPI for the API. Flask felt too verbose."
+memsync refresh --notes "Switched from Flask to FastAPI. Flask felt too verbose."
 ```
 
-The Claude API reads your notes and your current memory file, decides what to update,
-and writes a new version of the file. The old version is backed up automatically.
-
-You'll see output like:
-
-```
-Refreshing global memory... done.
-  Backup:    /Users/jamie/OneDrive/.claude-memory/backups/GLOBAL_MEMORY_20260321_143022.md
-  Memory:    /Users/jamie/OneDrive/.claude-memory/GLOBAL_MEMORY.md
-  CLAUDE.md synced ✓
-```
+Both commands backup the current memory file before writing anything.
 
 ### When nothing important changed
 
-If you had a routine session with no decisions or changes worth remembering, you don't
-need to run refresh. It's a deliberate action for meaningful updates, not a mandatory
-end-of-session ritual.
+If you had a routine session with nothing worth keeping, skip both commands. Harvest is
+for when something happened — decisions, completions, problems solved.
 
 ### Preview before writing
 
-Not sure what the refresh will do? Use `--dry-run`:
+Not sure what the update will do? Use `--dry-run` with either command:
 
 ```bash
+memsync harvest --dry-run
 memsync refresh --notes "your notes" --dry-run
 ```
 
-This shows you what the updated file would look like (as a diff) without writing
-anything. Nothing is changed until you run the command without `--dry-run`.
+This shows you a diff of what would change without writing anything.
 
 ---
 
@@ -431,6 +446,19 @@ On each new machine, you just need to:
    `GLOBAL_MEMORY.md` in it
 
 That's it. The memory file already exists; init just wires up the local link.
+
+---
+
+## Running the daemon for automatic memory capture
+
+Right now you have to remember to run `memsync harvest` after each session.
+The daemon automates this — it runs `harvest` every night at 2am while you sleep.
+
+To set it up, see `docs/DAEMON_SETUP.md`. It has instructions for:
+- **Mac** — start manually or auto-start at login via launchd
+- **Windows** — auto-start at login via Task Scheduler
+- **Linux** — auto-start at boot via systemd
+- **Raspberry Pi** — full setup guide for running the daemon 24/7 on a dedicated device
 
 ---
 

@@ -3,20 +3,21 @@
 ## System overview
 
 ```
-User runs: memsync refresh --notes "..."
-                │
-                ▼
+User runs: memsync harvest              User runs: memsync refresh --notes "..."
+                │                                           │
+                ▼                                           ▼
          memsync/cli.py          ← argument parsing, routes to commands
                 │
                 ▼
          memsync/config.py       ← loads ~/.config/memsync/config.toml
                 │
-                ▼
-    memsync/providers/<x>.py     ← resolves sync root path for this machine
-                │
-                ▼
-         memsync/sync.py         ← calls Claude API, merges notes into memory
-                │
+          ┌─────┴─────┐
+          ▼           ▼
+memsync/harvest.py   memsync/providers/<x>.py  ← resolves sync root path
+  (reads session               │
+   transcripts)                ▼
+          │           memsync/sync.py    ← calls Claude API (harvest or refresh)
+          └─────┬─────┘
                 ▼
        memsync/backups.py        ← backs up before writing
                 │
@@ -47,11 +48,21 @@ User runs: memsync refresh --notes "..."
 - Each provider implements `detect() -> Path | None` and `is_available() -> bool`.
 - See `PROVIDERS.md` for full spec and all three implementations.
 
+### `memsync/harvest.py`
+- Reads Claude Code session JSONL files from `~/.claude/projects/<key>/`.
+- `cwd_to_project_key(cwd)` — maps a working directory path to the Claude Code project key.
+- `find_project_dir(cwd)` — finds `~/.claude/projects/<key>` for the given directory.
+- `read_session_transcript(path)` — parses JSONL, extracts human messages + assistant text, skips tool calls/results/thinking. Returns `(transcript, message_count)`.
+- `load_harvested_index(memory_root)` / `save_harvested_index(...)` — tracks which session UUIDs have been processed. Index stored in `harvested.json` inside the memory root (synced via cloud).
+- Does NOT call the API. Caller (cli.py or scheduler) passes transcript to sync.py.
+
 ### `memsync/sync.py`
 - The only module that calls the Anthropic API.
-- Takes: notes (str), current memory (str), config (Config).
-- Returns: updated memory (str), changed (bool).
-- Does NOT write files. Caller handles I/O.
+- Two entry points:
+  - `refresh_memory_content(notes, current_memory, config)` — merges explicit user notes.
+  - `harvest_memory_content(transcript, current_memory, config)` — extracts memories from a session transcript.
+- Both return `{updated_content, changed, truncated}`. Neither writes files — caller handles I/O.
+- `enforce_hard_constraints(old, new)` — re-appends any hard constraint lines the model dropped. Called by both functions.
 - See `PITFALLS.md` — this module has the most trust/safety concerns.
 
 ### `memsync/backups.py`
@@ -84,6 +95,27 @@ User runs: memsync refresh --notes "..."
 10. cli.py       — print summary of what was created
 ```
 
+## Data flow: `memsync harvest`
+
+```
+1. cli.py        — parse args
+2. config.py     — load config
+3. providers/    — resolve memory root path
+4. harvest.py    — locate ~/.claude/projects/<key>/ for current working directory
+5. harvest.py    — load harvested.json (set of already-processed session UUIDs)
+6. harvest.py    — find most recent session JSONL not in the harvested index
+7. harvest.py    — parse JSONL: extract human messages + assistant text only
+8. cli.py        — (interactive mode) show session info, prompt to confirm
+9. (filesystem)  — read current GLOBAL_MEMORY.md
+10. sync.py      — call Claude API with transcript + current memory
+11. sync.py      — enforce hard constraints
+12. backups.py   — backup current file before overwriting
+13. (filesystem) — write updated GLOBAL_MEMORY.md
+14. claude_md.py — sync to ~/.claude/CLAUDE.md
+15. harvest.py   — save updated harvested.json (marks session as processed)
+16. cli.py       — print summary
+```
+
 ## Data flow: `memsync refresh`
 
 ```
@@ -108,12 +140,13 @@ User runs: memsync refresh --notes "..."
 # In cloud sync folder (synced across machines):
 OneDrive/.claude-memory/          ← or iCloud/.claude-memory/, etc.
   GLOBAL_MEMORY.md                ← source of truth
+  harvested.json                  ← index of already-harvested session UUIDs
   backups/
     GLOBAL_MEMORY_20260321_143022.md
     GLOBAL_MEMORY_20260320_091145.md
     ...
   sessions/
-    2026-03-21.md                 ← raw notes, append-only, never deleted
+    2026-03-21.md                 ← raw refresh notes, append-only, never deleted
     2026-03-20.md
     ...
 
@@ -121,6 +154,8 @@ OneDrive/.claude-memory/          ← or iCloud/.claude-memory/, etc.
 ~/.config/memsync/config.toml     ← machine-specific config
 ~/.claude/CLAUDE.md               ← symlink → OneDrive/.claude-memory/GLOBAL_MEMORY.md
                                      (or copy on Windows)
+~/.claude/projects/<key>/         ← Claude Code session transcripts (machine-local)
+  <uuid>.jsonl                    ← one file per conversation
 ```
 
 ---
@@ -180,4 +215,5 @@ when they upgrade their environment.
 - No dependencies beyond `anthropic`. Everything else stdlib.
 - `tomllib` is read-only (stdlib in 3.11+). Use `tomli_w` for writing, or write TOML
   manually for the simple schema we have. See `CONFIG.md`.
-- Must work offline except for `memsync refresh` (the only command needing the API).
+- Must work offline except for `memsync refresh` and `memsync harvest` (the only commands needing the API).
+- `harvest.py` reads machine-local Claude Code session files. It must not be imported by the daemon module — daemon imports from core only, never the reverse.
