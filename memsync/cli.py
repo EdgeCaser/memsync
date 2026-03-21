@@ -17,6 +17,7 @@ from memsync.providers import all_providers, auto_detect, get_provider
 from memsync.harvest import (
     find_latest_session,
     find_project_dir,
+    list_sessions,
     load_harvested_index,
     read_session_transcript,
     save_harvested_index,
@@ -296,6 +297,104 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def _harvest_all(
+    args: argparse.Namespace,
+    config: Config,
+    memory_root: Path,
+    global_memory: Path,
+) -> int:
+    """Sweep all projects under ~/.claude/projects/ and harvest unprocessed sessions."""
+    projects_dir_str = getattr(config, "daemon", None) and config.daemon.harvest_projects_dir
+    projects_dir = (
+        Path(projects_dir_str).expanduser()
+        if projects_dir_str
+        else Path("~/.claude/projects").expanduser()
+    )
+
+    if not projects_dir.exists():
+        if not args.auto:
+            print(f"No Claude Code projects directory found at {projects_dir}")
+        return 0
+
+    harvested = load_harvested_index(memory_root)
+    new_sessions: list[Path] = []
+    for project_dir in sorted(projects_dir.iterdir()):
+        if project_dir.is_dir():
+            for session_path in list_sessions(project_dir):
+                if session_path.stem not in harvested:
+                    new_sessions.append(session_path)
+
+    if not new_sessions:
+        if not args.auto:
+            print("No new sessions to harvest.")
+        return 0
+
+    if not args.auto:
+        print(f"Found {len(new_sessions)} unprocessed session(s) across all projects.")
+
+    if args.model:
+        config = dataclasses.replace(config, model=args.model)
+
+    current_memory = load_or_init_memory(global_memory)
+    changed_any = False
+    errors = 0
+
+    for session_path in new_sessions:
+        transcript, _ = read_session_transcript(session_path)
+        harvested.add(session_path.stem)  # mark regardless of outcome
+
+        if not transcript.strip():
+            continue
+
+        if not args.auto:
+            print(f"  Harvesting {session_path.stem}...", end=" ", flush=True)
+
+        try:
+            result = harvest_memory_content(transcript, current_memory, config)
+        except anthropic.APIError as e:
+            print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
+            errors += 1
+            continue
+
+        if result["truncated"]:
+            if not args.auto:
+                print(f"truncated — skipped.")
+            continue
+
+        if result.get("malformed"):
+            if not args.auto:
+                print(f"malformed response — skipped.")
+            errors += 1
+            continue
+
+        if result["changed"]:
+            current_memory = result["updated_content"]
+            changed_any = True
+            if not args.auto:
+                print("updated.")
+        else:
+            if not args.auto:
+                print("no changes.")
+
+    # Persist index and write memory once after all sessions processed
+    save_harvested_index(memory_root, harvested)
+
+    if changed_any:
+        backup_path = backup(global_memory, memory_root / "backups")
+        global_memory.write_text(current_memory, encoding="utf-8")
+        sync_claude_md(global_memory, config.claude_md_target)
+        if not args.auto:
+            print(f"\ndone.")
+            print(f"  Backup:    {backup_path}")
+            print(f"  Memory:    {global_memory}")
+            print("  CLAUDE.md synced ✓")
+    else:
+        if not args.auto:
+            print("\nNo memory changes.")
+
+    return 1 if errors else 0
+
+
 def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
     """Extract memories from a Claude Code session transcript."""
     import datetime
@@ -312,6 +411,10 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
             file=sys.stderr,
         )
         return 3
+
+    # --all: sweep every project under ~/.claude/projects/
+    if getattr(args, "all", False):
+        return _harvest_all(args, config, memory_root, global_memory)
 
     # Resolve project dir
     if args.project:
@@ -1029,6 +1132,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_harvest = subparsers.add_parser(
         "harvest",
         help="Extract memories from a Claude Code session transcript",
+    )
+    p_harvest.add_argument(
+        "--all", action="store_true",
+        help="Sweep all projects under ~/.claude/projects/ (for scheduled runs)",
     )
     p_harvest.add_argument(
         "--project", help="Path to the ~/.claude/projects/<key> directory (default: current project)"
