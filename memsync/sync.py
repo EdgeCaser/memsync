@@ -80,6 +80,8 @@ SESSION TRANSCRIPT:
             "changed": False,
             "truncated": False,
             "malformed": True,
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
         }
 
     updated_content = enforce_hard_constraints(current_memory, updated_content)
@@ -91,6 +93,8 @@ SESSION TRANSCRIPT:
         "changed": changed,
         "truncated": truncated,
         "malformed": False,
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
     }
 
 
@@ -136,6 +140,8 @@ SESSION NOTES:
             "changed": False,
             "truncated": False,
             "malformed": True,
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
         }
 
     # Enforce hard constraints in code — model can silently drop them (PITFALLS #1)
@@ -151,6 +157,8 @@ SESSION NOTES:
         "changed": changed,
         "truncated": truncated,
         "malformed": False,
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
     }
 
 

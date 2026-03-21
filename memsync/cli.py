@@ -23,6 +23,7 @@ from memsync.harvest import (
     save_harvested_index,
 )
 from memsync.sync import harvest_memory_content, load_or_init_memory, log_session_notes, refresh_memory_content
+from memsync.usage import append_usage, format_summary, load_usage, usage_log_path
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -249,6 +250,15 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         print(f"\nError: API request failed: {e}", file=sys.stderr)
         return 5
 
+    append_usage(
+        memory_root,
+        command="refresh",
+        model=config.model,
+        input_tokens=result.get("input_tokens", 0),
+        output_tokens=result.get("output_tokens", 0),
+        changed=result.get("changed", False),
+    )
+
     if args.dry_run:
         print("\n[DRY RUN] No files written.\n")
         if result["changed"]:
@@ -338,6 +348,7 @@ def _harvest_all(
     current_memory = load_or_init_memory(global_memory)
     changed_any = False
     errors = 0
+    _first_call = True
 
     for session_path in new_sessions:
         transcript, _ = read_session_transcript(session_path)
@@ -349,12 +360,27 @@ def _harvest_all(
         if not args.auto:
             print(f"  Harvesting {session_path.stem}...", end=" ", flush=True)
 
+        if not _first_call:
+            import time
+            time.sleep(20)
+        _first_call = False
+
         try:
             result = harvest_memory_content(transcript, current_memory, config)
         except anthropic.APIError as e:
             print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
             errors += 1
             continue
+
+        append_usage(
+            memory_root,
+            command="harvest",
+            model=config.model,
+            input_tokens=result.get("input_tokens", 0),
+            output_tokens=result.get("output_tokens", 0),
+            session_id=session_path.stem,
+            changed=result.get("changed", False),
+        )
 
         if result["truncated"]:
             if not args.auto:
@@ -496,6 +522,16 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         print(f"\nError: API request failed: {e}", file=sys.stderr)
         return 5
 
+    append_usage(
+        memory_root,
+        command="harvest",
+        model=config.model,
+        input_tokens=result.get("input_tokens", 0),
+        output_tokens=result.get("output_tokens", 0),
+        session_id=session_path.stem,
+        changed=result.get("changed", False),
+    )
+
     if args.dry_run:
         import difflib
         print("\n[DRY RUN] No files written.\n")
@@ -546,6 +582,20 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         print(f"  Memory:    {global_memory}")
         print("  CLAUDE.md synced ✓")
 
+    return 0
+
+
+def cmd_usage(args: argparse.Namespace, config: Config) -> int:
+    """Show API usage and estimated cost across all machines."""
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+
+    log_path = usage_log_path(memory_root)
+    entries = load_usage(memory_root)
+    print(f"Usage log: {log_path}")
+    print(f"Entries:   {len(entries)}\n")
+    print(format_summary(entries))
     return 0
 
 
@@ -1165,6 +1215,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_harvest.add_argument("--model", help="One-off model override (doesn't change config)")
     p_harvest.set_defaults(func=cmd_harvest)
+
+    # usage
+    p_usage = subparsers.add_parser("usage", help="Show API usage and estimated cost")
+    p_usage.set_defaults(func=cmd_usage)
 
     # show
     p_show = subparsers.add_parser("show", help="Print current global memory")
