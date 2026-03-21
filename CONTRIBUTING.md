@@ -7,7 +7,7 @@ Thanks for your interest. memsync is designed to be easy to extend — adding a 
 ## Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/memsync
+git clone https://github.com/EdgeCaser/memsync
 cd memsync
 pip install -e ".[dev]"
 ```
