@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
+import platform
+import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import anthropic
 import httpx
@@ -1347,3 +1350,716 @@ class TestCmdDoctorExtras:
         cmd_doctor(_args(), config)
         out = capsys.readouterr().out
         assert "env var" in out
+
+
+# ---------------------------------------------------------------------------
+# _resolve_memory_root / _require_memory_root error paths
+# ---------------------------------------------------------------------------
+
+class TestResolveMemoryRoot:
+    def test_unknown_provider_no_sync_root_returns_4(self, tmp_path, capsys):
+        """Unknown provider, no sync_root → KeyError → _require_memory_root returns 4."""
+        config = Config(
+            provider="unknown_provider_xyz",
+            sync_root=None,
+            claude_md_target=tmp_path / ".claude" / "CLAUDE.md",
+        )
+        result = cmd_show(_args(), config)
+        assert result == 4
+
+    def test_sync_root_set_unknown_provider_falls_back_to_claude_memory(self, tmp_path, capsys):
+        """sync_root set but unknown provider → fallback to .claude-memory subdir."""
+        sync_root = tmp_path / "sync"
+        sync_root.mkdir()
+        config = Config(
+            provider="unknown_xyz",
+            sync_root=sync_root,
+            claude_md_target=tmp_path / ".claude" / "CLAUDE.md",
+        )
+        # .claude-memory doesn't exist → returns 2
+        result = cmd_show(_args(), config)
+        assert result == 2
+
+    def test_provider_detect_succeeds_no_sync_root(self, tmp_path, capsys):
+        """Provider detect() returns a path → uses provider.get_memory_root()."""
+        fake_provider = MagicMock()
+        fake_provider.detect.return_value = tmp_path / "cloud"
+        fake_provider.get_memory_root.return_value = tmp_path / "cloud" / ".claude-memory"
+        config = Config(
+            provider="onedrive",
+            sync_root=None,
+            claude_md_target=tmp_path / ".claude" / "CLAUDE.md",
+        )
+        with patch("memsync.cli.get_provider", return_value=fake_provider):
+            result = cmd_show(_args(), config)
+        # memory_root path doesn't exist → returns 2
+        assert result == 2
+        fake_provider.get_memory_root.assert_called_once_with(tmp_path / "cloud")
+
+
+# ---------------------------------------------------------------------------
+# cmd_refresh — missing memory file paths
+# ---------------------------------------------------------------------------
+
+class TestCmdRefreshMemoryPaths:
+    def test_memory_root_none_returns_4(self, tmp_path, capsys):
+        config = Config(
+            provider="unknown_xyz",
+            sync_root=None,
+            claude_md_target=tmp_path / ".claude" / "CLAUDE.md",
+        )
+        result = cmd_refresh(_args(notes="notes"), config)
+        assert result == 4
+
+    def test_global_memory_missing_returns_3(self, tmp_config, capsys):
+        config, _ = tmp_config
+        # tmp_config has memory_root dir but no GLOBAL_MEMORY.md
+        result = cmd_refresh(_args(notes="notes"), config)
+        assert result == 3
+
+
+# ---------------------------------------------------------------------------
+# cmd_diff — missing memory root
+# ---------------------------------------------------------------------------
+
+class TestCmdDiffMemoryPath:
+    def test_memory_root_missing_returns_2(self, tmp_path, capsys):
+        config = Config(
+            provider="custom",
+            sync_root=tmp_path / "nonexistent",
+            claude_md_target=tmp_path / ".claude" / "CLAUDE.md",
+        )
+        result = cmd_diff(_args(), config)
+        assert result == 2
+
+
+# ---------------------------------------------------------------------------
+# cmd_prune — additional paths
+# ---------------------------------------------------------------------------
+
+class TestCmdPruneExtras:
+    def test_memory_root_missing_returns_2(self, tmp_path, capsys):
+        config = Config(
+            provider="custom",
+            sync_root=tmp_path / "nonexistent",
+            claude_md_target=tmp_path / ".claude" / "CLAUDE.md",
+        )
+        result = cmd_prune(_args(), config)
+        assert result == 2
+
+    def test_dry_run_no_backups(self, memory_file, capsys):
+        config, _, _ = memory_file
+        result = cmd_prune(_args(keep_days=30, dry_run=True), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "No backups older" in out
+
+    def test_dry_run_would_delete(self, memory_file, capsys):
+        config, _, _ = memory_file
+        backup_dir = config.sync_root / ".claude-memory" / "backups"
+        old = backup_dir / "GLOBAL_MEMORY_20200101_000000.md"
+        old.write_text("old content", encoding="utf-8")
+        result = cmd_prune(_args(keep_days=1, dry_run=True), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "Would prune" in out
+
+
+# ---------------------------------------------------------------------------
+# _harvest_all — non-auto mode (print paths, model override, write path)
+# ---------------------------------------------------------------------------
+
+class TestHarvestAllNonAuto:
+    def _mock_result(self, changed=True, truncated=False, malformed=False, content=SAMPLE_MEMORY):
+        return {
+            "updated_content": content,
+            "changed": changed,
+            "truncated": truncated,
+            "malformed": malformed,
+            "input_tokens": 100,
+            "output_tokens": 50,
+        }
+
+    def _setup_project(self, tmp_path, n_sessions=1):
+        projects_dir = tmp_path / "claude-projects"
+        proj = projects_dir / "my-project"
+        proj.mkdir(parents=True)
+        sessions = []
+        for i in range(n_sessions):
+            s = proj / f"session-{i:03d}.jsonl"
+            s.write_text('{"type":"user","message":{"content":"hi"}}', encoding="utf-8")
+            sessions.append(s)
+        return projects_dir, sessions
+
+    def test_no_new_sessions_prints_message(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir = tmp_path / "projects"
+        (projects_dir / "my-project").mkdir(parents=True)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        result = _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "No new sessions" in out
+
+    def test_found_sessions_prints_count(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=False)):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    result = _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
+
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "unprocessed session" in out
+        assert "no changes" in out
+
+    def test_model_override_applies(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        captured = []
+
+        def mock_harvest(transcript, memory, cfg):
+            captured.append(cfg)
+            return self._mock_result(changed=False)
+
+        with patch("memsync.cli.harvest_memory_content", side_effect=mock_harvest):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    _harvest_all(
+                        _harvest_args(auto=True, model="claude-haiku-4-5-20251001"),
+                        config, memory_root, global_memory,
+                    )
+
+        assert captured[0].model == "claude-haiku-4-5-20251001"
+
+    def test_changed_non_auto_prints_done(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        updated = SAMPLE_MEMORY + "\n- new item"
+        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=True, content=updated)):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    with patch("memsync.cli.sync_claude_md"):
+                        result = _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
+
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "updated" in out
+        assert "done" in out
+
+    def test_no_changes_non_auto_prints_message(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=False)):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    result = _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
+
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "No memory changes" in out
+
+    def test_truncated_non_auto_prints(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(truncated=True)):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
+
+        out = capsys.readouterr().out
+        assert "truncated" in out
+
+    def test_malformed_non_auto_prints(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(malformed=True)):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
+
+        out = capsys.readouterr().out
+        assert "malformed" in out
+
+    def test_multiple_sessions_triggers_sleep(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path, n_sessions=2)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        sleep_calls = []
+        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=False)):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                    _harvest_all(_harvest_args(auto=True), config, memory_root, global_memory)
+
+        assert len(sleep_calls) == 1  # sleep only between 2nd+ sessions
+
+
+# ---------------------------------------------------------------------------
+# cmd_harvest — interactive confirmation (non-auto mode)
+# ---------------------------------------------------------------------------
+
+class TestCmdHarvestInteractive:
+    def _setup(self, memory_file, monkeypatch):
+        config, tmp_path, global_memory = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user","message":{"content":"hi"}}', encoding="utf-8")
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session", lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript", lambda p: ("transcript", 10))
+        return config, global_memory
+
+    def test_user_confirms_y_proceeds(self, memory_file, monkeypatch, capsys):
+        config, global_memory = self._setup(memory_file, monkeypatch)
+        updated = SAMPLE_MEMORY + "\n- new item"
+        mock_result = {
+            "updated_content": updated, "changed": True,
+            "truncated": False, "malformed": False,
+            "input_tokens": 100, "output_tokens": 50,
+        }
+        with patch("builtins.input", return_value="y"):
+            with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+                result = cmd_harvest(_harvest_args(auto=False), config)
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == updated
+
+    def test_user_confirms_n_aborts(self, memory_file, monkeypatch, capsys):
+        config, global_memory = self._setup(memory_file, monkeypatch)
+        original = global_memory.read_text(encoding="utf-8")
+        with patch("builtins.input", return_value="n"):
+            result = cmd_harvest(_harvest_args(auto=False), config)
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == original
+
+    def test_user_presses_enter_aborts(self, memory_file, monkeypatch, capsys):
+        config, global_memory = self._setup(memory_file, monkeypatch)
+        original = global_memory.read_text(encoding="utf-8")
+        with patch("builtins.input", return_value=""):
+            result = cmd_harvest(_harvest_args(auto=False), config)
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == original
+
+    def test_non_auto_success_prints_done(self, memory_file, monkeypatch, capsys):
+        config, _ = self._setup(memory_file, monkeypatch)
+        updated = SAMPLE_MEMORY + "\n- new item"
+        mock_result = {
+            "updated_content": updated, "changed": True,
+            "truncated": False, "malformed": False,
+            "input_tokens": 100, "output_tokens": 50,
+        }
+        with patch("builtins.input", return_value="y"):
+            with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+                result = cmd_harvest(_harvest_args(auto=False), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "done" in out
+
+    def test_non_auto_no_changes_prints_message(self, memory_file, monkeypatch, capsys):
+        config, _ = self._setup(memory_file, monkeypatch)
+        mock_result = {
+            "updated_content": SAMPLE_MEMORY, "changed": False,
+            "truncated": False, "malformed": False,
+            "input_tokens": 100, "output_tokens": 50,
+        }
+        with patch("builtins.input", return_value="y"):
+            with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+                result = cmd_harvest(_harvest_args(auto=False), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "no changes" in out
+
+
+# ---------------------------------------------------------------------------
+# cmd_harvest — session growth detection
+# ---------------------------------------------------------------------------
+
+class TestCmdHarvestGrowthDetection:
+    def _setup(self, memory_file, monkeypatch, stored_count):
+        import json
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-xyz.jsonl"
+        session.write_text('{"type":"user","message":{"content":"hi"}}', encoding="utf-8")
+        (memory_root / "harvested.json").write_text(
+            json.dumps({"session-xyz": stored_count}), encoding="utf-8"
+        )
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session", lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript", lambda p: ("transcript", 10))
+        return config, global_memory
+
+    def test_same_count_skips_silently(self, memory_file, monkeypatch, capsys):
+        config, _ = self._setup(memory_file, monkeypatch, stored_count=10)
+        result = cmd_harvest(_harvest_args(auto=True), config)
+        assert result == 0
+
+    def test_old_format_minus_one_skips(self, memory_file, monkeypatch, capsys):
+        config, _ = self._setup(memory_file, monkeypatch, stored_count=-1)
+        result = cmd_harvest(_harvest_args(auto=True), config)
+        assert result == 0
+
+    def test_grown_session_proceeds(self, memory_file, monkeypatch, capsys):
+        config, global_memory = self._setup(memory_file, monkeypatch, stored_count=5)
+        updated = SAMPLE_MEMORY + "\n- grown item"
+        mock_result = {
+            "updated_content": updated, "changed": True,
+            "truncated": False, "malformed": False,
+            "input_tokens": 100, "output_tokens": 50,
+        }
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            result = cmd_harvest(_harvest_args(auto=True), config)
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == updated
+
+    def test_force_bypasses_count_check(self, memory_file, monkeypatch, capsys):
+        config, global_memory = self._setup(memory_file, monkeypatch, stored_count=10)
+        updated = SAMPLE_MEMORY + "\n- forced item"
+        mock_result = {
+            "updated_content": updated, "changed": True,
+            "truncated": False, "malformed": False,
+            "input_tokens": 100, "output_tokens": 50,
+        }
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            result = cmd_harvest(_harvest_args(auto=True, force=True), config)
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == updated
+
+    def test_no_growth_non_auto_prints_message(self, memory_file, monkeypatch, capsys):
+        config, _ = self._setup(memory_file, monkeypatch, stored_count=10)
+        result = cmd_harvest(_harvest_args(auto=False), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "No new messages" in out
+
+
+# ---------------------------------------------------------------------------
+# cmd_harvest — BadRequestError non-model re-raise
+# ---------------------------------------------------------------------------
+
+class TestCmdHarvestBadRequestNonModel:
+    def test_non_model_bad_request_reraises(self, memory_file, monkeypatch):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session", lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript", lambda p: ("transcript", 1))
+
+        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        err = anthropic.BadRequestError(
+            message="invalid content format",
+            response=httpx.Response(400, request=_req),
+            body={"error": {"message": "invalid content format"}},
+        )
+        with patch("memsync.cli.harvest_memory_content", side_effect=err):
+            with pytest.raises(anthropic.BadRequestError):
+                cmd_harvest(_harvest_args(auto=True), config)
+
+
+# ---------------------------------------------------------------------------
+# cmd_init — provider branch and fallback paths
+# ---------------------------------------------------------------------------
+
+def _init_args(**kwargs):
+    defaults = {"sync_root": None, "provider": None, "force": False}
+    defaults.update(kwargs)
+
+    class Namespace:
+        pass
+
+    ns = Namespace()
+    for k, v in defaults.items():
+        setattr(ns, k, v)
+    return ns
+
+
+class TestCmdInitProviderBranch:
+    def test_unknown_provider_returns_1(self, tmp_config, capsys, monkeypatch):
+        config, tmp_path = tmp_config
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "no-config.toml")
+        result = cmd_init(_init_args(provider="nosuchprovider"), config)
+        assert result == 1
+
+    def test_provider_detect_fails_returns_4(self, tmp_config, capsys, monkeypatch):
+        config, tmp_path = tmp_config
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "no-config.toml")
+        fake = MagicMock()
+        fake.detect.return_value = None
+        fake.name = "onedrive"
+        monkeypatch.setattr("memsync.cli.get_provider", lambda name: fake)
+        result = cmd_init(_init_args(provider="onedrive"), config)
+        assert result == 4
+
+    def test_sync_root_unknown_provider_falls_back_to_custom(self, tmp_config, capsys, monkeypatch):
+        config, tmp_path = tmp_config
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "no-config.toml")
+        sync_root = tmp_path / "cloud"
+        sync_root.mkdir()
+        monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, tgt: None)
+        result = cmd_init(_init_args(sync_root=str(sync_root), provider="nosuchprovider"), config)
+        assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# Daemon import guard + per-command no-guard paths
+# ---------------------------------------------------------------------------
+
+class TestDaemonImportGuardExtras:
+    def test_guard_returns_false_when_import_fails(self, capsys):
+        from memsync.cli import _daemon_import_guard
+        with patch.dict(sys.modules, {"apscheduler": None}):
+            result = _daemon_import_guard()
+        assert result is False
+
+    def test_daemon_status_guard_false_returns_1(self, tmp_config, capsys):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_status
+        with patch("memsync.cli._daemon_import_guard", return_value=False):
+            result = cmd_daemon_status(object(), config)
+        assert result == 1
+
+    def test_daemon_schedule_guard_false_returns_1(self, tmp_config, capsys):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_schedule
+        with patch("memsync.cli._daemon_import_guard", return_value=False):
+            result = cmd_daemon_schedule(object(), config)
+        assert result == 1
+
+    def test_daemon_schedule_no_jobs_prints_message(self, tmp_config, capsys):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_schedule
+        fake_scheduler = MagicMock()
+        fake_scheduler.get_jobs.return_value = []
+        with patch("memsync.daemon.scheduler.build_scheduler", return_value=fake_scheduler):
+            result = cmd_daemon_schedule(object(), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "No jobs" in out
+
+    def test_daemon_install_guard_false_returns_1(self, tmp_config, capsys):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_install
+        with patch("memsync.cli._daemon_import_guard", return_value=False):
+            result = cmd_daemon_install(object(), config)
+        assert result == 1
+
+    def test_daemon_install_permission_error_returns_1(self, tmp_config, capsys):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_install
+        with patch("memsync.daemon.service.install_service", side_effect=PermissionError):
+            result = cmd_daemon_install(object(), config)
+        assert result == 1
+
+    def test_daemon_uninstall_guard_false_returns_1(self, tmp_config, capsys):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_uninstall
+        with patch("memsync.cli._daemon_import_guard", return_value=False):
+            result = cmd_daemon_uninstall(object(), config)
+        assert result == 1
+
+    def test_daemon_uninstall_not_implemented_returns_1(self, tmp_config, capsys):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_uninstall
+        with patch("memsync.daemon.service.uninstall_service",
+                   side_effect=NotImplementedError("not supported")):
+            result = cmd_daemon_uninstall(object(), config)
+        assert result == 1
+
+    def test_daemon_web_guard_false_returns_1(self, tmp_config, capsys):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_web
+        with patch("memsync.cli._daemon_import_guard", return_value=False):
+            result = cmd_daemon_web(object(), config)
+        assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# cmd_daemon_stop — with PID file
+# ---------------------------------------------------------------------------
+
+class TestCmdDaemonStopWithPid:
+    def test_invalid_pid_text_returns_1(self, tmp_config, capsys, tmp_path, monkeypatch):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_stop
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text("not-a-number", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", pid_file)
+        result = cmd_daemon_stop(object(), config)
+        assert result == 1
+
+    def test_kills_process_and_removes_pid_file(self, tmp_config, capsys, tmp_path, monkeypatch):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_stop
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text("99999", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", pid_file)
+
+        if platform.system() == "Windows":
+            with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+                result = cmd_daemon_stop(object(), config)
+        else:
+            with patch("os.kill", return_value=None):
+                result = cmd_daemon_stop(object(), config)
+
+        assert result == 0
+        assert not pid_file.exists()
+
+    def test_stale_pid_removes_file(self, tmp_config, capsys, tmp_path, monkeypatch):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_stop
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text("99999", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", pid_file)
+
+        # Both Windows (via OSError) and Unix (via ProcessLookupError) are caught
+        if platform.system() == "Windows":
+            with patch("subprocess.run", side_effect=OSError("process not found")):
+                result = cmd_daemon_stop(object(), config)
+        else:
+            with patch("os.kill", side_effect=ProcessLookupError()):
+                result = cmd_daemon_stop(object(), config)
+
+        assert result == 0
+        assert not pid_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# cmd_daemon_status — with PID file
+# ---------------------------------------------------------------------------
+
+class TestCmdDaemonStatusWithPid:
+    def test_invalid_pid_text_returns_1(self, tmp_config, capsys, tmp_path, monkeypatch):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_status
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text("not-a-number", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", pid_file)
+        result = cmd_daemon_status(object(), config)
+        assert result == 1
+
+    def test_running_process_reports_running(self, tmp_config, capsys, tmp_path, monkeypatch):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_status
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text("12345", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", pid_file)
+
+        if platform.system() == "Windows":
+            mock_result = MagicMock()
+            mock_result.stdout = "12345 python.exe"
+            with patch("subprocess.run", return_value=mock_result):
+                result = cmd_daemon_status(object(), config)
+        else:
+            with patch("os.kill", return_value=None):
+                result = cmd_daemon_status(object(), config)
+
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "running" in out.lower()
+
+    def test_stale_pid_reports_not_running(self, tmp_config, capsys, tmp_path, monkeypatch):
+        config, _ = tmp_config
+        from memsync.cli import cmd_daemon_status
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text("12345", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", pid_file)
+
+        if platform.system() == "Windows":
+            mock_result = MagicMock()
+            mock_result.stdout = "no match here"
+            with patch("subprocess.run", return_value=mock_result):
+                result = cmd_daemon_status(object(), config)
+        else:
+            with patch("os.kill", side_effect=ProcessLookupError()):
+                result = cmd_daemon_status(object(), config)
+
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "not running" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# cmd_doctor — additional paths
+# ---------------------------------------------------------------------------
+
+class TestCmdDoctorAdditional:
+    def test_unknown_provider_no_sync_root(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        config_no_root = dataclasses.replace(config, provider="unknown_xyz", sync_root=None)
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
+        (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
+        result = cmd_doctor(_args(), config_no_root)
+        out = capsys.readouterr().out
+        assert "unknown provider" in out
+
+    def test_memory_root_none_shows_cannot_resolve(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        config_bad = dataclasses.replace(config, provider="unknown_xyz", sync_root=None)
+        monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
+        (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
+        result = cmd_doctor(_args(), config_bad)
+        out = capsys.readouterr().out
+        assert "cannot resolve" in out
+
+
+# ---------------------------------------------------------------------------
+# cmd_status — symlink CLAUDE.md
+# ---------------------------------------------------------------------------
+
+class TestCmdStatusSymlink:
+    def test_symlink_claude_md_shows_symlink(self, memory_file, capsys):
+        config, tmp_path, global_memory = memory_file
+        target = config.claude_md_target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.symlink_to(global_memory)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not supported on this platform")
+
+        result = cmd_status(_args(), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "symlink" in out
+
+
+# ---------------------------------------------------------------------------
+# main() entry point
+# ---------------------------------------------------------------------------
+
+class TestMain:
+    def test_main_exits_0_for_providers(self, tmp_config, monkeypatch):
+        from memsync.cli import main
+        config, _ = tmp_config
+        monkeypatch.setattr("sys.argv", ["memsync", "providers"])
+        monkeypatch.setattr("memsync.config.Config.load", lambda: config)
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
