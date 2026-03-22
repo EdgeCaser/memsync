@@ -23,7 +23,7 @@ memsync solves this by:
 2. Keeping `~/.claude/CLAUDE.md` in sync with that file automatically
 3. Using the Claude API to update the memory file — either by reading your session transcript directly, or by merging notes you provide
 
-After a session, run `memsync harvest` and memsync reads what happened and updates the memory file itself.
+After a session, run `memsync harvest` and memsync reads what happened and updates the memory file itself. Or install the daemon and it does this automatically every night — no commands needed at all.
 
 ---
 
@@ -89,51 +89,32 @@ authenticate with Anthropic's servers.
 
 Keep this key somewhere safe. You won't be able to see it again on the Anthropic website.
 
-### Setting the API key in your terminal
+### Storing the API key
 
-memsync looks for the key in an environment variable called `ANTHROPIC_API_KEY`.
-You need to set this so it's available every time you open a terminal.
-
-**Mac / Linux:**
-
-Open your shell config file in a text editor. If you use zsh (default on modern Macs):
+The recommended way is to store it in memsync's config file. After you run `memsync init`
+in Step 4, run this:
 
 ```bash
-open -e ~/.zshrc
+memsync config set api_key sk-ant-your-key-here
 ```
 
-If you use bash:
+memsync saves the key in its config file (`~/.config/memsync/config.toml` on Mac/Linux,
+`%APPDATA%\memsync\config.toml` on Windows). It's stored on your machine only, not in
+your cloud sync folder or any code.
 
-```bash
-open -e ~/.bashrc
-```
+**Alternative: environment variable**
 
-Add this line at the bottom, replacing `your-key-here` with your actual key:
+You can also set `ANTHROPIC_API_KEY` as a shell environment variable if you prefer.
+memsync will use it as a fallback when no key is set in config.
 
+**Mac / Linux** — add to `~/.zshrc` or `~/.bashrc`:
 ```
 export ANTHROPIC_API_KEY="sk-ant-your-key-here"
 ```
 
-Save the file, then close and reopen your terminal. To verify it worked:
-
-```bash
-echo $ANTHROPIC_API_KEY
-```
-
-You should see your key printed back.
-
 **Windows (PowerShell):**
-
-To set it permanently for your user account, run this in PowerShell (replacing the key):
-
 ```powershell
 [System.Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-your-key-here", "User")
-```
-
-Close and reopen PowerShell to pick up the change. To verify:
-
-```powershell
-echo $env:ANTHROPIC_API_KEY
 ```
 
 ---
@@ -331,9 +312,16 @@ This checks each component and tells you exactly what's wrong if something isn't
 
 ## Your daily workflow
 
-Once set up, updating your memory takes one command at the end of a session.
+Once set up, you have two ways to use memsync: **run commands manually** after each
+session, or **install the daemon** and let it handle everything automatically.
 
-### Option 1: Let memsync read the session (recommended)
+> **The daemon is the recommended approach.** Once installed, it harvests your sessions
+> every night at 2am without you doing anything. See
+> [Running the daemon](#running-the-daemon-recommended) below.
+
+If you prefer manual control, here's how:
+
+### Option 1: Let memsync read the session
 
 `memsync harvest` reads Claude Code's session transcript directly — the actual
 conversation — and extracts what's worth remembering. You don't need to write notes.
@@ -430,6 +418,68 @@ memsync refresh --file my-notes.txt
 echo "Switched to the new deploy pipeline, everything works" | memsync refresh
 ```
 
+### Track API usage and cost
+
+memsync logs every API call it makes. To see a summary across all your machines:
+
+```bash
+memsync usage
+```
+
+This shows total calls, token counts, estimated cost, and a breakdown by machine. The
+log lives in your cloud folder so it accumulates across devices. Typical usage is
+around $3–10/month.
+
+---
+
+## Running the daemon (recommended)
+
+The daemon is the hands-off way to use memsync. Instead of running commands after
+each session, it runs in the background and keeps your memory current automatically.
+
+Install the daemon extras:
+
+```bash
+pip install 'memsync[daemon]'   # quotes required on Mac/zsh
+```
+
+Start it in the background:
+
+```bash
+memsync daemon start --detach
+```
+
+Register it as a system service so it starts automatically on login/boot:
+
+```bash
+memsync daemon install
+```
+
+What runs automatically once the daemon is installed:
+
+| Job | Time | What it does |
+|---|---|---|
+| Harvest | 2:00am | Reads today's session transcripts, extracts memories |
+| Refresh | 11:55pm | Merges notes captured via mobile |
+| Drift check | Every 6h | Alerts if CLAUDE.md is out of sync |
+
+The daemon also starts a **web UI** at `http://localhost:5000` for viewing and editing
+your memory file in a browser, and a **mobile capture endpoint** at port 5001 for
+sending notes from iPhone Shortcuts or any HTTP client.
+
+Other daemon commands:
+
+```bash
+memsync daemon status      # show whether it's running and what's configured
+memsync daemon schedule    # show all jobs and next run times
+memsync daemon stop        # stop the background process
+memsync daemon web         # open the web UI in your browser
+memsync daemon uninstall   # remove the system service registration
+```
+
+For platform-specific setup (launchd on Mac, Task Scheduler on Windows, systemd on
+Linux, or a Raspberry Pi for 24/7 operation), see `docs/DAEMON_SETUP.md`.
+
 ---
 
 ## Setting up on a second computer
@@ -440,25 +490,12 @@ through your cloud folder.
 On each new machine, you just need to:
 
 1. Install Python (Step 1)
-2. Set your `ANTHROPIC_API_KEY` (Step 2)
-3. Install memsync: `pip install memsync`
-4. Run `memsync init` — it will find the same cloud folder, which already has
+2. Install memsync: `pip install memsync`
+3. Run `memsync init` — it will find the same cloud folder, which already has
    `GLOBAL_MEMORY.md` in it
+4. Store your API key: `memsync config set api_key sk-ant-your-key-here`
 
 That's it. The memory file already exists; init just wires up the local link.
-
----
-
-## Running the daemon for automatic memory capture
-
-Right now you have to remember to run `memsync harvest` after each session.
-The daemon automates this — it runs `harvest` every night at 2am while you sleep.
-
-To set it up, see `docs/DAEMON_SETUP.md`. It has instructions for:
-- **Mac** — start manually or auto-start at login via launchd
-- **Windows** — auto-start at login via Task Scheduler
-- **Linux** — auto-start at boot via systemd
-- **Raspberry Pi** — full setup guide for running the daemon 24/7 on a dedicated device
 
 ---
 
@@ -498,18 +535,16 @@ Then run `memsync status` to confirm it's found.
 
 ---
 
-### "ANTHROPIC_API_KEY" shows ✗ in memsync doctor
+### "API key" shows ✗ in memsync doctor
 
-The API key isn't set in your environment. Go back to Step 2 and follow the instructions
-for your operating system. Remember to close and reopen the terminal after adding the key.
-
-To test it immediately without reopening:
+The API key isn't configured. The simplest fix:
 
 ```bash
-# Mac/Linux
-export ANTHROPIC_API_KEY="sk-ant-your-key-here"
-memsync doctor
+memsync config set api_key sk-ant-your-key-here
 ```
+
+Then run `memsync doctor` again to confirm. If you'd rather use an environment variable,
+see Step 2 for platform-specific instructions.
 
 ---
 
