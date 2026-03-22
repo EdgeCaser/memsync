@@ -253,12 +253,12 @@ class TestReadSessionTranscript:
 
 @pytest.mark.smoke
 class TestHarvestIndex:
-    def test_returns_empty_set_when_no_file(self, tmp_path):
+    def test_returns_empty_dict_when_no_file(self, tmp_path):
         result = load_harvested_index(tmp_path)
-        assert result == set()
+        assert result == {}
 
     def test_round_trip(self, tmp_path):
-        original = {"uuid-1", "uuid-2", "uuid-3"}
+        original = {"uuid-1": 42, "uuid-2": 7, "uuid-3": 100}
         save_harvested_index(tmp_path, original)
         loaded = load_harvested_index(tmp_path)
         assert loaded == original
@@ -266,12 +266,27 @@ class TestHarvestIndex:
     def test_handles_corrupted_file(self, tmp_path):
         (tmp_path / "harvested.json").write_text("not json", encoding="utf-8")
         result = load_harvested_index(tmp_path)
-        assert result == set()
+        assert result == {}
 
     def test_save_is_sorted(self, tmp_path):
-        save_harvested_index(tmp_path, {"ccc", "aaa", "bbb"})
+        save_harvested_index(tmp_path, {"ccc": 1, "aaa": 2, "bbb": 3})
         raw = json.loads((tmp_path / "harvested.json").read_text(encoding="utf-8"))
-        assert raw == sorted(raw)
+        assert list(raw.keys()) == sorted(raw.keys())
+
+    def test_migrates_old_list_format(self, tmp_path):
+        # Old harvested.json was a list of stems
+        (tmp_path / "harvested.json").write_text(
+            '["uuid-a", "uuid-b"]', encoding="utf-8"
+        )
+        result = load_harvested_index(tmp_path)
+        assert result == {"uuid-a": -1, "uuid-b": -1}
+
+    def test_ignores_invalid_dict_entries(self, tmp_path):
+        (tmp_path / "harvested.json").write_text(
+            '{"good": 5, "bad": "not-an-int"}', encoding="utf-8"
+        )
+        result = load_harvested_index(tmp_path)
+        assert result == {"good": 5}
 
 
 # ---------------------------------------------------------------------------

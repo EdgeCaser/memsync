@@ -745,7 +745,7 @@ class TestCmdHarvest:
         result = cmd_harvest(_harvest_args(), config)
         out = capsys.readouterr().out
         assert result == 0
-        assert "No new sessions" in out
+        assert "No sessions found" in out
 
     def test_empty_transcript_returns_0(self, memory_file, monkeypatch, capsys):
         config, tmp_path, _ = memory_file

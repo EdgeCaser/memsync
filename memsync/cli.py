@@ -357,8 +357,8 @@ def _harvest_all(
     _first_call = True
 
     for session_path in new_sessions:
-        transcript, _ = read_session_transcript(session_path)
-        harvested.add(session_path.stem)  # mark regardless of outcome
+        transcript, msg_count = read_session_transcript(session_path)
+        harvested[session_path.stem] = msg_count  # mark regardless of outcome
 
         if not transcript.strip():
             continue
@@ -474,14 +474,12 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
             print(f"Error: session file not found: {args.session}", file=sys.stderr)
             return 1
     else:
-        session_path = find_latest_session(
-            project_dir,
-            exclude=None if args.force else harvested,
-        )
+        # Always find the latest session — growth check happens below
+        session_path = find_latest_session(project_dir, exclude=None)
         if session_path is None:
             if args.auto:
                 return 0  # Silent success — nothing to do
-            print("No new sessions to harvest. Use --force to re-harvest the latest.")
+            print("No sessions found in project directory.")
             return 0
 
     # Parse transcript
@@ -491,6 +489,19 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
             return 0
         print("Session transcript is empty — nothing to harvest.")
         return 0
+
+    # Skip if already harvested and session hasn't grown since last harvest
+    if not args.force and session_path.stem in harvested:
+        stored_count = harvested[session_path.stem]
+        # stored_count == -1: old index format, count unknown — treat as already done
+        if stored_count < 0 or message_count <= stored_count:
+            if args.auto:
+                return 0
+            print(
+                f"No new messages since last harvest ({message_count} messages). "
+                "Use --force to re-harvest."
+            )
+            return 0
 
     # Confirmation prompt (skipped in --auto mode)
     if not args.auto:
@@ -571,8 +582,8 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         )
         return 6
 
-    # Mark session as harvested regardless of whether memory changed
-    harvested.add(session_path.stem)
+    # Mark session as harvested with current message count
+    harvested[session_path.stem] = message_count
     save_harvested_index(memory_root, harvested)
 
     if not result["changed"]:
