@@ -129,22 +129,33 @@ def read_session_transcript(path: Path) -> tuple[str, int]:
 # Harvest index — tracks which sessions have already been processed
 # ---------------------------------------------------------------------------
 
-def load_harvested_index(memory_root: Path) -> set[str]:
-    """Load the set of already-harvested session UUIDs (file stems)."""
+def load_harvested_index(memory_root: Path) -> dict[str, int]:
+    """
+    Load the harvest index: session stem → message count at harvest time.
+    Returns {} if the index doesn't exist.
+
+    Backward compatible with the old list format — those entries get count -1
+    (meaning "harvested but message count unknown, treat as already done").
+    """
     index_path = memory_root / "harvested.json"
     if not index_path.exists():
-        return set()
+        return {}
     try:
         data = json.loads(index_path.read_text(encoding="utf-8"))
-        return set(data) if isinstance(data, list) else set()
+        if isinstance(data, list):
+            # Migrate old list format — count unknown
+            return {stem: -1 for stem in data if isinstance(stem, str)}
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, int)}
+        return {}
     except (json.JSONDecodeError, ValueError):
-        return set()
+        return {}
 
 
-def save_harvested_index(memory_root: Path, harvested: set[str]) -> None:
-    """Persist the set of harvested session UUIDs."""
+def save_harvested_index(memory_root: Path, harvested: dict[str, int]) -> None:
+    """Persist the harvest index (session stem → message count)."""
     index_path = memory_root / "harvested.json"
     index_path.write_text(
-        json.dumps(sorted(harvested), indent=2, ensure_ascii=False),
+        json.dumps(harvested, indent=2, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
