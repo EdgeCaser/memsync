@@ -60,6 +60,20 @@ class TestCwdToProjectKey:
         p = Path("/Users/ian/Documents/GitHub/memsync")
         assert cwd_to_project_key(p) == "-Users-ian-Documents-GitHub-memsync"
 
+    def test_spaces_in_path_unix(self):
+        if platform.system() == "Windows":
+            pytest.skip("Unix path test")
+        p = Path("/Users/ian/Documents/Untitled Gods Book")
+        assert cwd_to_project_key(p) == "-Users-ian-Documents-Untitled-Gods-Book"
+
+    def test_spaces_in_path_windows(self, monkeypatch):
+        if platform.system() != "Windows":
+            pytest.skip("Windows path test")
+        p = Path(r"C:\Users\ianfe\OneDrive\Documents\Untitled Gods Book")
+        key = cwd_to_project_key(p)
+        assert "Untitled-Gods-Book" in key
+        assert " " not in key
+
 
 # ---------------------------------------------------------------------------
 # find_project_dir
