@@ -90,6 +90,10 @@ ignore = [
 targets = ["memsync"]
 skips = [
     "B101",   # assert_used — we don't use asserts in production code
+    "B104",   # hardcoded_bind_all_interfaces — daemon web UI binds 0.0.0.0 intentionally
+    "B404",   # import_subprocess — needed for daemon start/stop/status
+    "B603",   # subprocess_without_shell_equals_true — args are hardcoded, not user input
+    "B607",   # start_process_with_partial_path — system commands (taskkill, systemctl, launchctl)
     "B608",   # hardcoded_sql_expressions — false positive on error message strings; no SQL in codebase
 ]
 exclude_dirs = ["tests"]

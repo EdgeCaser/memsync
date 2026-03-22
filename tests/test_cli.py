@@ -1,21 +1,27 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
+import anthropic
+import httpx
 import pytest
 
 from memsync.cli import (
+    _harvest_all,
     build_parser,
     cmd_config_set,
     cmd_config_show,
     cmd_diff,
     cmd_doctor,
+    cmd_harvest,
     cmd_init,
     cmd_providers,
     cmd_prune,
     cmd_refresh,
     cmd_show,
     cmd_status,
+    cmd_usage,
 )
 from memsync.config import Config
 
@@ -658,3 +664,686 @@ class TestDaemonCLIGuard:
         parser = build_parser()
         args = parser.parse_args(["daemon", "start", "--detach"])
         assert args.detach is True
+
+
+# ---------------------------------------------------------------------------
+# cmd_harvest
+# ---------------------------------------------------------------------------
+
+def _harvest_args(**kwargs):
+    """Build a minimal args namespace for harvest commands."""
+    defaults = {
+        "project": None, "session": None, "all": False,
+        "auto": False, "force": False, "dry_run": False, "model": None,
+    }
+    defaults.update(kwargs)
+
+    class Namespace:
+        pass
+
+    ns = Namespace()
+    for k, v in defaults.items():
+        setattr(ns, k, v)
+    return ns
+
+
+class TestCmdHarvest:
+    def _mock_harvest_result(self, changed=True, truncated=False, malformed=False,
+                             content=SAMPLE_MEMORY):
+        return {
+            "updated_content": content,
+            "changed": changed,
+            "truncated": truncated,
+            "malformed": malformed,
+            "input_tokens": 100,
+            "output_tokens": 50,
+        }
+
+    def test_returns_code_when_memory_root_missing(self, tmp_path, capsys):
+        config = Config(provider="custom", sync_root=tmp_path / "nonexistent")
+        result = cmd_harvest(_harvest_args(), config)
+        assert result == 2
+
+    def test_returns_3_when_no_global_memory(self, tmp_config, capsys):
+        config, tmp_path = tmp_config
+        result = cmd_harvest(_harvest_args(), config)
+        assert result == 3
+
+    def test_all_flag_delegates(self, memory_file, monkeypatch):
+        config, tmp_path, global_memory = memory_file
+        with patch("memsync.cli._harvest_all", return_value=0) as mock_all:
+            result = cmd_harvest(_harvest_args(all=True), config)
+        assert result == 0
+        mock_all.assert_called_once()
+
+    def test_explicit_project_path(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+
+        # No sessions in project dir
+        result = cmd_harvest(_harvest_args(project=str(project_dir), auto=True), config)
+        assert result == 0
+
+    def test_project_not_found_returns_1(self, memory_file, capsys):
+        config, tmp_path, _ = memory_file
+        result = cmd_harvest(_harvest_args(project="/nonexistent/path"), config)
+        assert result == 1
+
+    def test_auto_detect_project_dir_not_found_returns_4(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: None)
+        result = cmd_harvest(_harvest_args(), config)
+        assert result == 4
+
+    def test_no_new_sessions_returns_0(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session", lambda pd, exclude=None: None)
+        result = cmd_harvest(_harvest_args(), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "No new sessions" in out
+
+    def test_empty_transcript_returns_0(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "abc.jsonl"
+        session.write_text("", encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript", lambda p: ("", 0))
+
+        result = cmd_harvest(_harvest_args(auto=True), config)
+        assert result == 0
+
+    def test_successful_update(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user","message":{"content":"hello"}}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript text", 1))
+
+        updated = SAMPLE_MEMORY + "\n- harvested item"
+        mock_result = self._mock_harvest_result(changed=True, content=updated)
+
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            result = cmd_harvest(_harvest_args(auto=True), config)
+
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == updated
+
+    def test_no_changes(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        mock_result = self._mock_harvest_result(changed=False)
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            result = cmd_harvest(_harvest_args(auto=True), config)
+
+        assert result == 0
+
+    def test_dry_run_does_not_write(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        original = global_memory.read_text(encoding="utf-8")
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        updated = SAMPLE_MEMORY + "\n- new item"
+        mock_result = self._mock_harvest_result(changed=True, content=updated)
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            result = cmd_harvest(_harvest_args(auto=True, dry_run=True), config)
+
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == original
+
+    def test_truncated_returns_5(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        mock_result = self._mock_harvest_result(changed=True, truncated=True)
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            result = cmd_harvest(_harvest_args(auto=True), config)
+
+        assert result == 5
+
+    def test_malformed_returns_6(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        mock_result = self._mock_harvest_result(changed=True, malformed=True)
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            result = cmd_harvest(_harvest_args(auto=True), config)
+
+        assert result == 6
+
+    def test_bad_request_error_model(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        err = anthropic.BadRequestError(
+            message="model not found",
+            response=httpx.Response(400, request=_req),
+            body={"error": {"message": "model not found"}},
+        )
+        with patch("memsync.cli.harvest_memory_content", side_effect=err):
+            result = cmd_harvest(_harvest_args(auto=True), config)
+
+        assert result == 5
+
+    def test_api_error_returns_5(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        err = anthropic.APIError(
+            message="server error",
+            request=_req,
+            body={"error": {"message": "server error"}},
+        )
+        with patch("memsync.cli.harvest_memory_content", side_effect=err):
+            result = cmd_harvest(_harvest_args(auto=True), config)
+
+        assert result == 5
+
+    def test_model_override(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-abc.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        mock_result = self._mock_harvest_result(changed=False)
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result) as mock_fn:
+            cmd_harvest(_harvest_args(auto=True, model="claude-haiku-4-5-20251001"), config)
+
+        called_config = mock_fn.call_args.args[2]
+        assert called_config.model == "claude-haiku-4-5-20251001"
+
+    def test_session_marked_as_harvested(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = project_dir / "session-xyz.jsonl"
+        session.write_text('{"type":"user"}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.find_latest_session",
+                            lambda pd, exclude=None: session)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        mock_result = self._mock_harvest_result(changed=False)
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            cmd_harvest(_harvest_args(auto=True), config)
+
+        import json
+        index = json.loads((memory_root / "harvested.json").read_text(encoding="utf-8"))
+        assert "session-xyz" in index
+
+    def test_explicit_session_path(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        session = tmp_path / "custom-session.jsonl"
+        session.write_text('{"type":"user","message":{"content":"hi"}}', encoding="utf-8")
+
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        monkeypatch.setattr("memsync.cli.read_session_transcript",
+                            lambda p: ("transcript", 1))
+
+        mock_result = self._mock_harvest_result(changed=False)
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            result = cmd_harvest(
+                _harvest_args(project=str(project_dir), session=str(session), auto=True),
+                config,
+            )
+
+        assert result == 0
+
+    def test_session_not_found_returns_1(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
+        result = cmd_harvest(
+            _harvest_args(project=str(project_dir), session="/nonexistent/session.jsonl"),
+            config,
+        )
+        assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# _harvest_all
+# ---------------------------------------------------------------------------
+
+def _redirect_projects_dir(monkeypatch, target_dir):
+    """Monkeypatch Path.expanduser so ~/.claude/projects resolves to target_dir."""
+    _orig = Path.expanduser
+
+    def _expanduser(self):
+        # Handle both Unix (/) and Windows (\) separators
+        s = str(self).replace("\\", "/")
+        if ".claude/projects" in s:
+            return target_dir
+        return _orig(self)
+
+    monkeypatch.setattr(Path, "expanduser", _expanduser)
+
+
+class TestHarvestAll:
+    def _mock_harvest_result(self, changed=True, truncated=False, malformed=False,
+                             content=SAMPLE_MEMORY):
+        return {
+            "updated_content": content,
+            "changed": changed,
+            "truncated": truncated,
+            "malformed": malformed,
+            "input_tokens": 100,
+            "output_tokens": 50,
+        }
+
+    def test_no_projects_dir(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        _redirect_projects_dir(monkeypatch, tmp_path / "nonexistent-projects")
+
+        result = _harvest_all(
+            _harvest_args(auto=True), config, memory_root, global_memory,
+        )
+        assert result == 0
+
+    def test_no_new_sessions(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir = tmp_path / "projects"
+        proj = projects_dir / "my-project"
+        proj.mkdir(parents=True)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        # No JSONL files in project dir
+        result = _harvest_all(_harvest_args(auto=True), config, memory_root, global_memory)
+        assert result == 0
+
+    def test_processes_sessions_and_writes(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+
+        projects_dir = tmp_path / "claude-projects"
+        proj = projects_dir / "my-project"
+        proj.mkdir(parents=True)
+        s1 = proj / "session-001.jsonl"
+        s1.write_text('{"type":"user","message":{"content":"hi"}}', encoding="utf-8")
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        updated = SAMPLE_MEMORY + "\n- harvested from all"
+        mock_result = self._mock_harvest_result(changed=True, content=updated)
+
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    result = _harvest_all(
+                        _harvest_args(auto=True), config, memory_root, global_memory,
+                    )
+
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == updated
+
+    def test_api_error_increments_errors(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+
+        projects_dir = tmp_path / "claude-projects"
+        proj = projects_dir / "my-project"
+        proj.mkdir(parents=True)
+        s1 = proj / "session-001.jsonl"
+        s1.write_text('{"type":"user"}', encoding="utf-8")
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        err = anthropic.APIError(
+            message="server error",
+            request=_req,
+            body={"error": {"message": "server error"}},
+        )
+        with patch("memsync.cli.harvest_memory_content", side_effect=err):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    result = _harvest_all(
+                        _harvest_args(auto=True), config, memory_root, global_memory,
+                    )
+
+        assert result == 1  # errors > 0
+
+    def test_skips_truncated(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+
+        projects_dir = tmp_path / "claude-projects"
+        proj = projects_dir / "my-project"
+        proj.mkdir(parents=True)
+        s1 = proj / "session-001.jsonl"
+        s1.write_text('{"type":"user"}', encoding="utf-8")
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        mock_result = self._mock_harvest_result(changed=True, truncated=True)
+        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    _harvest_all(
+                        _harvest_args(auto=True), config, memory_root, global_memory,
+                    )
+
+        # No error, but truncated session is skipped — memory unchanged
+        original = (
+            "<!-- memsync v0.2 -->\n"
+            "# Global Memory\n\n"
+            "## Identity & context\n"
+            "- Test user, software engineer\n\n"
+            "## Hard constraints\n"
+            "- Always backup before writing\n"
+            "- Never skip tests\n"
+        )
+        assert global_memory.read_text(encoding="utf-8") == original
+
+
+# ---------------------------------------------------------------------------
+# cmd_refresh — additional error paths
+# ---------------------------------------------------------------------------
+
+class TestCmdRefreshErrors:
+    def _mock_refresh_result(self, changed=True, truncated=False, malformed=False,
+                             content=SAMPLE_MEMORY):
+        return {
+            "updated_content": content,
+            "changed": changed,
+            "truncated": truncated,
+            "malformed": malformed,
+            "input_tokens": 100,
+            "output_tokens": 50,
+        }
+
+    def test_reads_from_file(self, memory_file, capsys):
+        config, tmp_path, global_memory = memory_file
+        note_file = tmp_path / "notes.txt"
+        note_file.write_text("notes from file", encoding="utf-8")
+
+        mock_result = self._mock_refresh_result(changed=False)
+        with patch("memsync.cli.refresh_memory_content", return_value=mock_result):
+            result = cmd_refresh(_args(file=str(note_file)), config)
+        assert result == 0
+
+    def test_file_not_found_returns_1(self, memory_file, capsys):
+        config, tmp_path, _ = memory_file
+        result = cmd_refresh(_args(file="/nonexistent/notes.txt"), config)
+        assert result == 1
+
+    def test_stdin_read(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        import io
+        monkeypatch.setattr("sys.stdin", io.StringIO("notes from stdin"))
+        monkeypatch.setattr("memsync.cli.sys.stdin",
+                            type("FakeStdin", (), {"isatty": lambda self: False,
+                                                   "read": lambda self: "notes from stdin"})())
+
+        mock_result = self._mock_refresh_result(changed=False)
+        with patch("memsync.cli.refresh_memory_content", return_value=mock_result):
+            result = cmd_refresh(_args(), config)
+        assert result == 0
+
+    def test_no_notes_no_stdin_returns_1(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        # Simulate a tty (no piped input)
+        monkeypatch.setattr("memsync.cli.sys.stdin",
+                            type("FakeStdin", (), {"isatty": lambda self: True})())
+        result = cmd_refresh(_args(), config)
+        assert result == 1
+
+    def test_bad_request_error_model(self, memory_file, capsys):
+        config, tmp_path, _ = memory_file
+        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        err = anthropic.BadRequestError(
+            message="model not found",
+            response=httpx.Response(400, request=_req),
+            body={"error": {"message": "model not found"}},
+        )
+        with patch("memsync.cli.refresh_memory_content", side_effect=err):
+            result = cmd_refresh(_args(notes="some notes"), config)
+        assert result == 5
+
+    def test_bad_request_error_non_model_reraises(self, memory_file, capsys):
+        config, tmp_path, _ = memory_file
+        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        err = anthropic.BadRequestError(
+            message="invalid request format",
+            response=httpx.Response(400, request=_req),
+            body={"error": {"message": "invalid request format"}},
+        )
+        with patch("memsync.cli.refresh_memory_content", side_effect=err):
+            with pytest.raises(anthropic.BadRequestError):
+                cmd_refresh(_args(notes="some notes"), config)
+
+    def test_api_error_returns_5(self, memory_file, capsys):
+        config, tmp_path, _ = memory_file
+        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        err = anthropic.APIError(
+            message="server error",
+            request=_req,
+            body={"error": {"message": "server error"}},
+        )
+        with patch("memsync.cli.refresh_memory_content", side_effect=err):
+            result = cmd_refresh(_args(notes="some notes"), config)
+        assert result == 5
+
+    def test_malformed_response_returns_6(self, memory_file, capsys):
+        config, tmp_path, _ = memory_file
+        mock_result = self._mock_refresh_result(changed=True, malformed=True)
+        with patch("memsync.cli.refresh_memory_content", return_value=mock_result):
+            result = cmd_refresh(_args(notes="some notes"), config)
+        assert result == 6
+
+    def test_dry_run_no_changes(self, memory_file, capsys):
+        config, tmp_path, _ = memory_file
+        mock_result = self._mock_refresh_result(changed=False)
+        with patch("memsync.cli.refresh_memory_content", return_value=mock_result):
+            result = cmd_refresh(_args(notes="some notes", dry_run=True), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "No changes" in out
+
+
+# ---------------------------------------------------------------------------
+# cmd_usage
+# ---------------------------------------------------------------------------
+
+class TestCmdUsage:
+    def test_prints_summary(self, memory_file, capsys):
+        config, tmp_path, _ = memory_file
+        result = cmd_usage(_args(), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "Usage log:" in out
+        assert "No usage recorded yet." in out
+
+    def test_returns_code_when_memory_root_missing(self, tmp_path, capsys):
+        config = Config(provider="custom", sync_root=tmp_path / "nonexistent")
+        result = cmd_usage(_args(), config)
+        assert result == 2
+
+
+# ---------------------------------------------------------------------------
+# cmd_status — additional paths
+# ---------------------------------------------------------------------------
+
+class TestCmdStatusExtras:
+    def test_sync_root_not_set_uses_provider(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, _ = memory_file
+        # Config without sync_root set — forces provider detection path
+        config_no_root = Config(
+            provider="custom",
+            sync_root=None,
+            claude_md_target=config.claude_md_target,
+        )
+        # Custom provider with sync_root=None will fail detection
+        result = cmd_status(_args(), config_no_root)
+        # Returns 4 because custom provider can't detect without config
+        assert result == 4
+
+    def test_target_is_copy(self, memory_file, capsys):
+        config, tmp_path, global_memory = memory_file
+        # Create a copy (not symlink) of CLAUDE.md
+        target = config.claude_md_target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(global_memory.read_text(encoding="utf-8"), encoding="utf-8")
+
+        result = cmd_status(_args(), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "copy" in out
+
+
+# ---------------------------------------------------------------------------
+# cmd_config_set — additional paths
+# ---------------------------------------------------------------------------
+
+class TestCmdConfigSetExtras:
+    def _set_args(self, key, value):
+        class Namespace:
+            pass
+        ns = Namespace()
+        ns.key = key
+        ns.value = value
+        return ns
+
+    def test_set_claude_md_target(self, tmp_config, monkeypatch):
+        config, tmp_path = tmp_config
+        saved = []
+        monkeypatch.setattr(Config, "save", lambda self: saved.append(self))
+        result = cmd_config_set(self._set_args("claude_md_target", "/custom/path"), config)
+        assert result == 0
+        assert saved[0].claude_md_target == Path("/custom/path")
+
+    def test_set_api_key(self, tmp_config, monkeypatch):
+        config, tmp_path = tmp_config
+        saved = []
+        monkeypatch.setattr(Config, "save", lambda self: saved.append(self))
+        result = cmd_config_set(self._set_args("api_key", "sk-ant-test-key"), config)
+        assert result == 0
+        assert saved[0].api_key == "sk-ant-test-key"
+
+    def test_set_max_memory_lines_non_integer(self, tmp_config, capsys):
+        config, tmp_path = tmp_config
+        result = cmd_config_set(self._set_args("max_memory_lines", "abc"), config)
+        assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# cmd_doctor — additional paths
+# ---------------------------------------------------------------------------
+
+class TestCmdDoctorExtras:
+    def test_api_key_from_config(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        # Set API key via config, not env
+        import dataclasses
+        config_with_key = dataclasses.replace(config, api_key="sk-ant-test")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr("memsync.cli.get_config_path",
+                            lambda: tmp_path / "config.toml")
+        (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
+
+        from memsync.claude_md import sync as sync_claude_md
+        config_with_key.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
+        sync_claude_md(global_memory, config_with_key.claude_md_target)
+
+        result = cmd_doctor(_args(), config_with_key)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "set via config" in out
+
+    def test_api_key_from_env(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-key")
+        monkeypatch.setattr("memsync.cli.get_config_path",
+                            lambda: tmp_path / "config.toml")
+        (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
+
+        from memsync.claude_md import sync as sync_claude_md
+        config.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
+        sync_claude_md(global_memory, config.claude_md_target)
+
+        cmd_doctor(_args(), config)
+        out = capsys.readouterr().out
+        assert "env var" in out
