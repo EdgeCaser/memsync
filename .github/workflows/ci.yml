@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dev dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,daemon]"
 
       - name: ruff (lint + style)
         run: ruff check memsync/
@@ -45,7 +45,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,daemon]"
 
       - name: Run tests (with coverage)
         run: pytest tests/ -v
