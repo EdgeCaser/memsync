@@ -26,8 +26,8 @@ def cwd_to_project_key(cwd: Path) -> str:
         # Drive letter colon becomes a dash; backslashes become dashes
         # e.g. C:\Users\Ian\foo → C--Users-Ian-foo
         raw = str(cwd.resolve())
-        return raw.replace(":", "-").replace("\\", "-")
-    return str(cwd.resolve()).replace("/", "-")
+        return raw.replace(":", "-").replace("\\", "-").replace(" ", "-")
+    return str(cwd.resolve()).replace("/", "-").replace(" ", "-")
 
 
 def find_project_dir(
