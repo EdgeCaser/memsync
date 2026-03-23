@@ -72,7 +72,7 @@ SESSION TRANSCRIPT:
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    updated_content = _strip_code_fences(response.content[0].text)
+    updated_content = _strip_model_wrapper(response.content[0].text)
 
     if not _looks_like_memory_file(updated_content):
         return {
@@ -98,12 +98,15 @@ SESSION TRANSCRIPT:
     }
 
 
-def _strip_code_fences(content: str) -> str:
+def _strip_model_wrapper(content: str) -> str:
     """
-    Strip leading/trailing code fences the model sometimes wraps responses in.
-    Handles ```markdown, ```md, or plain ``` openings.
+    Strip wrapper artifacts the model sometimes adds around the memory file:
+    - Code fences (```markdown, ```md, plain ```)
+    - Preamble lines before the first heading ("Here's the updated...", etc.)
     """
     stripped = content.strip()
+
+    # Strip code fences first
     if stripped.startswith("```"):
         lines = stripped.splitlines()
         # Remove opening fence line (e.g. ```markdown)
@@ -111,7 +114,19 @@ def _strip_code_fences(content: str) -> str:
         # Remove closing fence if present
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
-        return "\n".join(lines).strip()
+        stripped = "\n".join(lines).strip()
+
+    # Strip preamble lines before the first heading or comment marker.
+    # The model sometimes leads with "Here's the updated memory file:" or similar.
+    lines = stripped.splitlines()
+    while lines:
+        first = lines[0].strip()
+        if first.startswith("#") or first.startswith("<!--") or first == "":
+            break
+        # This line is preamble — drop it
+        lines = lines[1:]
+    stripped = "\n".join(lines).strip()
+
     return stripped
 
 
@@ -146,7 +161,7 @@ SESSION NOTES:
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    updated_content = _strip_code_fences(response.content[0].text)
+    updated_content = _strip_model_wrapper(response.content[0].text)
 
     # Reject responses that look like narrative explanations rather than a memory file.
     # The model occasionally ignores "no preamble" and returns prose — writing that
