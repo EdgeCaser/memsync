@@ -65,14 +65,18 @@ CURRENT GLOBAL MEMORY:
 SESSION TRANSCRIPT:
 {transcript}"""
 
+    prefill = _build_prefill(current_memory)
     response = client.messages.create(
         model=config.model,
         max_tokens=4096,
         system=HARVEST_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=[
+            {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": prefill},
+        ],
     )
 
-    updated_content = _strip_model_wrapper(response.content[0].text)
+    updated_content = _strip_model_wrapper(prefill + response.content[0].text)
 
     if not _looks_like_memory_file(updated_content):
         return {
@@ -96,6 +100,20 @@ SESSION TRANSCRIPT:
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
     }
+
+
+def _build_prefill(current_memory: str) -> str:
+    """
+    Build an assistant prefill string that forces the model to start outputting
+    the memory file rather than a narrative summary.
+
+    Uses the first line of the current memory if it looks like a valid start
+    (heading or comment marker), otherwise falls back to the memsync comment.
+    """
+    first_line = current_memory.strip().splitlines()[0] if current_memory.strip() else ""
+    if first_line.startswith("#") or first_line.startswith("<!--"):
+        return first_line
+    return "<!-- memsync v0.2 -->"
 
 
 def _strip_model_wrapper(content: str) -> str:
@@ -154,14 +172,18 @@ CURRENT GLOBAL MEMORY:
 SESSION NOTES:
 {notes}"""
 
+    prefill = _build_prefill(current_memory)
     response = client.messages.create(
         model=config.model,
         max_tokens=4096,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=[
+            {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": prefill},
+        ],
     )
 
-    updated_content = _strip_model_wrapper(response.content[0].text)
+    updated_content = _strip_model_wrapper(prefill + response.content[0].text)
 
     # Reject responses that look like narrative explanations rather than a memory file.
     # The model occasionally ignores "no preamble" and returns prose — writing that
