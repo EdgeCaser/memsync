@@ -136,7 +136,19 @@ class TestLogSessionNotes:
 
 
 class TestRefreshMemoryContent:
-    def _make_mock_response(self, text: str, stop_reason: str = "end_turn") -> MagicMock:
+    def _make_mock_response(self, text: str, stop_reason: str = "end_turn",
+                            current_memory: str = SAMPLE_MEMORY) -> MagicMock:
+        """
+        Simulate the API returning a continuation after the prefill.
+
+        With assistant prefill, the API only returns the text *after* the prefill.
+        The code then combines: prefill + response.content[0].text.
+        So the mock must strip the prefill line from the expected output.
+        """
+        from memsync.sync import _build_prefill
+        prefill = _build_prefill(current_memory)
+        if text.startswith(prefill):
+            text = text[len(prefill):]
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text=text)]
         mock_response.stop_reason = stop_reason
