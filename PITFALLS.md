@@ -156,18 +156,20 @@ This is handled in the prototype's `cmd_refresh`. Keep it in the refactor.
 
 ---
 
-## 10. The `max_tokens=4000` ceiling
+## 10. The `max_tokens` ceiling
 
-GLOBAL_MEMORY.md is capped at ~400 lines. At average prose density, 4000 tokens
-is enough headroom. But if a user has a very dense memory file and writes extensive
-notes, the response can get truncated — the file gets written with the truncation
-mid-sentence.
+Every harvest/refresh call must re-emit the entire memory file. If `max_tokens`
+is lower than the tokenized file length, the API returns `stop_reason=max_tokens`
+and memsync skips the session as "truncated". A dense memory file can blow past
+4096 tokens easily — a 400-line file with a long hard-constraints section is
+~6-10k tokens.
 
-Mitigation: set `max_tokens` to 4096 (the safe maximum for most models) and
-add a post-write check that the file ends with a complete line (no truncation mid-word).
-If truncated, restore from backup and print an error.
+Mitigation: `max_tokens` is a config field (`[core] max_tokens`, default 16384).
+Raise it if harvests start reporting truncation. Truncation detection uses
+`stop_reason == "max_tokens"` — more reliable than content heuristics.
 
-Not implemented in the prototype — add it in the refactor.
+Historical note: original ceiling was 4096, which silently skipped all sessions
+once the memory file grew past that size.
 
 ---
 

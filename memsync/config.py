@@ -62,6 +62,7 @@ class Config:
     provider: str = "onedrive"
     model: str = "claude-sonnet-4-20250514"
     max_memory_lines: int = 400
+    max_tokens: int = 16384     # API response ceiling — must exceed tokenized memory file size
     api_key: str = ""           # stored in config.toml (AppData), not in env
 
     # [paths]
@@ -131,6 +132,7 @@ class Config:
             provider=core.get("provider", "onedrive"),
             model=core.get("model", "claude-sonnet-4-20250514"),
             max_memory_lines=core.get("max_memory_lines", 400),
+            max_tokens=core.get("max_tokens", 16384),
             api_key=core.get("api_key", ""),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
@@ -158,6 +160,7 @@ class Config:
             f'provider = "{self.provider}"',
             f'model = "{self.model}"',
             f"max_memory_lines = {self.max_memory_lines}",
+            f"max_tokens = {self.max_tokens}",
         ]
         if self.api_key:
             lines.append(f'api_key = "{self.api_key}"')
