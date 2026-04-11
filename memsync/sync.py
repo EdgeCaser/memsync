@@ -68,7 +68,7 @@ SESSION TRANSCRIPT:
     prefill = _build_prefill(current_memory)
     response = client.messages.create(
         model=config.model,
-        max_tokens=4096,
+        max_tokens=config.max_tokens,
         system=HARVEST_SYSTEM_PROMPT,
         messages=[
             {"role": "user", "content": user_prompt},
@@ -175,7 +175,7 @@ SESSION NOTES:
     prefill = _build_prefill(current_memory)
     response = client.messages.create(
         model=config.model,
-        max_tokens=4096,
+        max_tokens=config.max_tokens,
         system=SYSTEM_PROMPT,
         messages=[
             {"role": "user", "content": user_prompt},
