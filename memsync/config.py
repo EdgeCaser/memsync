@@ -60,10 +60,18 @@ class DaemonConfig:
 class Config:
     # [core]
     provider: str = "onedrive"
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4-20250514"   # used only when llm_backend = "anthropic"
     max_memory_lines: int = 400
     max_tokens: int = 16384     # API response ceiling — must exceed tokenized memory file size
-    api_key: str = ""           # stored in config.toml (AppData), not in env
+    api_key: str = ""           # Anthropic API key (legacy); stored in config.toml, not env
+
+    # [llm] — backend selection and per-backend settings
+    llm_backend: str = "gemini"              # "gemini" | "ollama" | "anthropic"
+    fallback_backend: str = "ollama"         # tried when llm_backend fails; "none" to hard-error
+    gemini_api_key: str = ""                 # AI Studio key; leave empty to use ADC instead
+    gemini_model: str = "gemini-2.0-flash"    # any model available on your Gemini account
+    ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
+    ollama_model: str = "llama3.2:3b"        # ~2GB RAM; good balance of quality and Pi headroom
 
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
@@ -128,12 +136,20 @@ class Config:
             digest_smtp_password=daemon_raw.get("digest_smtp_password", ""),
         )
 
+        llm_raw = raw.get("llm", {})
+
         instance = cls(
             provider=core.get("provider", "onedrive"),
             model=core.get("model", "claude-sonnet-4-20250514"),
             max_memory_lines=core.get("max_memory_lines", 400),
             max_tokens=core.get("max_tokens", 16384),
             api_key=core.get("api_key", ""),
+            llm_backend=llm_raw.get("backend", "gemini"),
+            fallback_backend=llm_raw.get("fallback_backend", "ollama"),
+            gemini_api_key=llm_raw.get("gemini_api_key", ""),
+            gemini_model=llm_raw.get("gemini_model", "gemini-2.0-flash"),
+            ollama_base_url=llm_raw.get("ollama_base_url", "http://localhost:11434/v1"),
+            ollama_model=llm_raw.get("ollama_model", "llama3.2:3b"),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -177,7 +193,16 @@ class Config:
             "[backups]",
             f"keep_days = {self.keep_days}",
             "",
+            "[llm]",
+            f'backend = "{self.llm_backend}"',
+            f'fallback_backend = "{self.fallback_backend}"',
+            f'gemini_model = "{self.gemini_model}"',
+            f'ollama_base_url = "{self.ollama_base_url}"',
+            f'ollama_model = "{self.ollama_model}"',
         ]
+        if self.gemini_api_key:
+            lines.append(f'gemini_api_key = "{self.gemini_api_key}"')
+        lines.append("")
 
         # Only write [daemon] section if daemon is enabled (i.e. user ran daemon install)
         if self.daemon.enabled:

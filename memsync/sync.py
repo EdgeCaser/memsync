@@ -3,9 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import anthropic
-
 from memsync.config import Config
+from memsync.llm import call_llm
 
 # The system prompt is load-bearing — see PITFALLS.md #8 before editing.
 # Specific phrases matter; don't casually reword them.
@@ -51,13 +50,11 @@ RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."
 
 def harvest_memory_content(transcript: str, current_memory: str, config: Config) -> dict:
     """
-    Call the Claude API to extract memories from a session transcript and merge
+    Call the configured LLM to extract memories from a session transcript and merge
     them into current_memory.
     Returns a dict with keys: updated_content (str), changed (bool), truncated (bool).
     Does NOT write files — caller handles I/O.
     """
-    client = anthropic.Anthropic(api_key=config.api_key or None)
-
     user_prompt = f"""\
 CURRENT GLOBAL MEMORY:
 {current_memory}
@@ -66,17 +63,9 @@ SESSION TRANSCRIPT:
 {transcript}"""
 
     prefill = _build_prefill(current_memory)
-    response = client.messages.create(
-        model=config.model,
-        max_tokens=config.max_tokens,
-        system=HARVEST_SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": prefill},
-        ],
-    )
+    llm_result = call_llm(HARVEST_SYSTEM_PROMPT, user_prompt, prefill, config)
 
-    updated_content = _strip_model_wrapper(prefill + response.content[0].text)
+    updated_content = _strip_model_wrapper(llm_result["text"])
 
     if not _looks_like_memory_file(updated_content):
         return {
@@ -84,21 +73,20 @@ SESSION TRANSCRIPT:
             "changed": False,
             "truncated": False,
             "malformed": True,
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+            "input_tokens": llm_result["input_tokens"],
+            "output_tokens": llm_result["output_tokens"],
         }
 
     updated_content = enforce_hard_constraints(current_memory, updated_content)
     changed = updated_content != current_memory.strip()
-    truncated = response.stop_reason == "max_tokens"
 
     return {
         "updated_content": updated_content,
         "changed": changed,
-        "truncated": truncated,
+        "truncated": llm_result["truncated"],
         "malformed": False,
-        "input_tokens": response.usage.input_tokens,
-        "output_tokens": response.usage.output_tokens,
+        "input_tokens": llm_result["input_tokens"],
+        "output_tokens": llm_result["output_tokens"],
     }
 
 
@@ -159,12 +147,10 @@ def _looks_like_memory_file(content: str) -> bool:
 
 def refresh_memory_content(notes: str, current_memory: str, config: Config) -> dict:
     """
-    Call the Claude API to merge notes into current_memory.
+    Call the configured LLM to merge notes into current_memory.
     Returns a dict with keys: updated_content (str), changed (bool), malformed (bool).
     Does NOT write files — caller handles I/O.
     """
-    client = anthropic.Anthropic(api_key=config.api_key or None)
-
     user_prompt = f"""\
 CURRENT GLOBAL MEMORY:
 {current_memory}
@@ -173,17 +159,9 @@ SESSION NOTES:
 {notes}"""
 
     prefill = _build_prefill(current_memory)
-    response = client.messages.create(
-        model=config.model,
-        max_tokens=config.max_tokens,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": prefill},
-        ],
-    )
+    llm_result = call_llm(SYSTEM_PROMPT, user_prompt, prefill, config)
 
-    updated_content = _strip_model_wrapper(prefill + response.content[0].text)
+    updated_content = _strip_model_wrapper(llm_result["text"])
 
     # Reject responses that look like narrative explanations rather than a memory file.
     # The model occasionally ignores "no preamble" and returns prose — writing that
@@ -194,8 +172,8 @@ SESSION NOTES:
             "changed": False,
             "truncated": False,
             "malformed": True,
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+            "input_tokens": llm_result["input_tokens"],
+            "output_tokens": llm_result["output_tokens"],
         }
 
     # Enforce hard constraints in code — model can silently drop them (PITFALLS #1)
@@ -203,16 +181,13 @@ SESSION NOTES:
 
     changed = updated_content != current_memory.strip()
 
-    # Detect truncation via stop_reason — more reliable than content heuristics (PITFALLS #10)
-    truncated = response.stop_reason == "max_tokens"
-
     return {
         "updated_content": updated_content,
         "changed": changed,
-        "truncated": truncated,
+        "truncated": llm_result["truncated"],
         "malformed": False,
-        "input_tokens": response.usage.input_tokens,
-        "output_tokens": response.usage.output_tokens,
+        "input_tokens": llm_result["input_tokens"],
+        "output_tokens": llm_result["output_tokens"],
     }
 
 

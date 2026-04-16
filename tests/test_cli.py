@@ -6,9 +6,9 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import anthropic
-import httpx
 import pytest
+
+from memsync.llm import LLMError
 
 from memsync.cli import (
     _harvest_all,
@@ -83,7 +83,7 @@ class TestCmdStatus:
         out = capsys.readouterr().out
         assert result == 0
         assert "Platform:" in out
-        assert "Model:" in out
+        assert "LLM backend:" in out
 
     def test_shows_memory_path(self, memory_file, capsys):
         config, tmp_path, global_memory = memory_file
@@ -866,7 +866,7 @@ class TestCmdHarvest:
 
         assert result == 6
 
-    def test_bad_request_error_model(self, memory_file, monkeypatch, capsys):
+    def test_llm_error_returns_5(self, memory_file, monkeypatch, capsys):
         config, tmp_path, _ = memory_file
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -879,37 +879,7 @@ class TestCmdHarvest:
         monkeypatch.setattr("memsync.cli.read_session_transcript",
                             lambda p: ("transcript", 1))
 
-        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-        err = anthropic.BadRequestError(
-            message="model not found",
-            response=httpx.Response(400, request=_req),
-            body={"error": {"message": "model not found"}},
-        )
-        with patch("memsync.cli.harvest_memory_content", side_effect=err):
-            result = cmd_harvest(_harvest_args(auto=True), config)
-
-        assert result == 5
-
-    def test_api_error_returns_5(self, memory_file, monkeypatch, capsys):
-        config, tmp_path, _ = memory_file
-        project_dir = tmp_path / "project"
-        project_dir.mkdir()
-        session = project_dir / "session-abc.jsonl"
-        session.write_text('{"type":"user"}', encoding="utf-8")
-
-        monkeypatch.setattr("memsync.cli.find_project_dir", lambda cwd: project_dir)
-        monkeypatch.setattr("memsync.cli.find_latest_session",
-                            lambda pd, exclude=None: session)
-        monkeypatch.setattr("memsync.cli.read_session_transcript",
-                            lambda p: ("transcript", 1))
-
-        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-        err = anthropic.APIError(
-            message="server error",
-            request=_req,
-            body={"error": {"message": "server error"}},
-        )
-        with patch("memsync.cli.harvest_memory_content", side_effect=err):
+        with patch("memsync.cli.harvest_memory_content", side_effect=LLMError("all backends failed")):
             result = cmd_harvest(_harvest_args(auto=True), config)
 
         assert result == 5
@@ -1075,13 +1045,7 @@ class TestHarvestAll:
         s1.write_text('{"type":"user"}', encoding="utf-8")
         _redirect_projects_dir(monkeypatch, projects_dir)
 
-        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-        err = anthropic.APIError(
-            message="server error",
-            request=_req,
-            body={"error": {"message": "server error"}},
-        )
-        with patch("memsync.cli.harvest_memory_content", side_effect=err):
+        with patch("memsync.cli.harvest_memory_content", side_effect=LLMError("all backends failed")):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     result = _harvest_all(
@@ -1174,39 +1138,10 @@ class TestCmdRefreshErrors:
         result = cmd_refresh(_args(), config)
         assert result == 1
 
-    def test_bad_request_error_model(self, memory_file, capsys):
+    def test_llm_error_returns_5(self, memory_file, capsys):
         config, tmp_path, _ = memory_file
-        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-        err = anthropic.BadRequestError(
-            message="model not found",
-            response=httpx.Response(400, request=_req),
-            body={"error": {"message": "model not found"}},
-        )
-        with patch("memsync.cli.refresh_memory_content", side_effect=err):
-            result = cmd_refresh(_args(notes="some notes"), config)
-        assert result == 5
-
-    def test_bad_request_error_non_model_reraises(self, memory_file, capsys):
-        config, tmp_path, _ = memory_file
-        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-        err = anthropic.BadRequestError(
-            message="invalid request format",
-            response=httpx.Response(400, request=_req),
-            body={"error": {"message": "invalid request format"}},
-        )
-        with patch("memsync.cli.refresh_memory_content", side_effect=err):
-            with pytest.raises(anthropic.BadRequestError):
-                cmd_refresh(_args(notes="some notes"), config)
-
-    def test_api_error_returns_5(self, memory_file, capsys):
-        config, tmp_path, _ = memory_file
-        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-        err = anthropic.APIError(
-            message="server error",
-            request=_req,
-            body={"error": {"message": "server error"}},
-        )
-        with patch("memsync.cli.refresh_memory_content", side_effect=err):
+        with patch("memsync.cli.refresh_memory_content",
+                   side_effect=LLMError("all backends failed")):
             result = cmd_refresh(_args(notes="some notes"), config)
         assert result == 5
 
@@ -1319,9 +1254,9 @@ class TestCmdConfigSetExtras:
 class TestCmdDoctorExtras:
     def test_api_key_from_config(self, memory_file, monkeypatch, capsys):
         config, tmp_path, global_memory = memory_file
-        # Set API key via config, not env
+        # Set API key via config using the Anthropic legacy backend
         import dataclasses
-        config_with_key = dataclasses.replace(config, api_key="sk-ant-test")
+        config_with_key = dataclasses.replace(config, api_key="sk-ant-test", llm_backend="anthropic")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.setattr("memsync.cli.get_config_path",
                             lambda: tmp_path / "config.toml")
@@ -1342,6 +1277,8 @@ class TestCmdDoctorExtras:
         monkeypatch.setattr("memsync.cli.get_config_path",
                             lambda: tmp_path / "config.toml")
         (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
+        import dataclasses
+        config = dataclasses.replace(config, llm_backend="anthropic")
 
         from memsync.claude_md import sync as sync_claude_md
         config.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
@@ -1773,15 +1710,10 @@ class TestCmdHarvestBadRequestNonModel:
         monkeypatch.setattr("memsync.cli.find_latest_session", lambda pd, exclude=None: session)
         monkeypatch.setattr("memsync.cli.read_session_transcript", lambda p: ("transcript", 1))
 
-        _req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-        err = anthropic.BadRequestError(
-            message="invalid content format",
-            response=httpx.Response(400, request=_req),
-            body={"error": {"message": "invalid content format"}},
-        )
-        with patch("memsync.cli.harvest_memory_content", side_effect=err):
-            with pytest.raises(anthropic.BadRequestError):
-                cmd_harvest(_harvest_args(auto=True), config)
+        with patch("memsync.cli.harvest_memory_content",
+                   side_effect=LLMError("all backends failed")):
+            result = cmd_harvest(_harvest_args(auto=True), config)
+        assert result == 5
 
 
 # ---------------------------------------------------------------------------

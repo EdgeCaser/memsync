@@ -22,7 +22,8 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
-    "anthropic>=0.40.0",
+    "openai>=1.0",
+    "google-auth>=2.0",
 ]
 
 [project.urls]
@@ -33,6 +34,9 @@ Issues = "https://github.com/EdgeCaser/memsync/issues"
 memsync = "memsync.cli:main"
 
 [project.optional-dependencies]
+anthropic = [
+    "anthropic>=0.40.0",
+]
 daemon = [
     "apscheduler>=3.10",
     "flask>=3.0",
