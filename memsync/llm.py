@@ -186,7 +186,7 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
             cmd,
             input=full_prompt.encode("utf-8"),  # bytes bypasses Windows cp1252 encoding issues
             capture_output=True,
-            timeout=300,
+            timeout=600,
         )
     except FileNotFoundError as e:
         raise RuntimeError(
