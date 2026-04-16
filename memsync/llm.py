@@ -225,6 +225,7 @@ def _call_ollama(system: str, user: str, prefill: str, config: Config) -> dict:
             {"role": "system", "content": _inject_prefill(system, prefill)},
             {"role": "user", "content": user},
         ],
+        extra_body={"options": {"num_ctx": 32768}},  # expand context window beyond 8K default
     )
 
     choice = response.choices[0]
