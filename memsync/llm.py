@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 
 from memsync.config import Config
 
@@ -168,9 +170,6 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
     Uses the CLI's own Google account OAuth — no API key required.
     Prompt is passed via stdin to avoid Windows command line length limits.
     """
-    import subprocess
-    import sys
-
     full_prompt = _inject_prefill(system, prefill) + "\n\n" + user
 
     # -p with a short string triggers headless mode; full content comes from stdin.
@@ -187,7 +186,7 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
             cmd,
             input=full_prompt.encode("utf-8"),  # bytes bypasses Windows cp1252 encoding issues
             capture_output=True,
-            timeout=180,
+            timeout=300,
         )
     except FileNotFoundError as e:
         raise RuntimeError(
