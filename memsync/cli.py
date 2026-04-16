@@ -294,6 +294,18 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     backup_path = backup(global_memory, memory_root / "backups")
     global_memory.write_text(result["updated_content"], encoding="utf-8")
     sync_claude_md(global_memory, config.claude_md_target)
+
+    # Log the transaction for auditability
+    from memsync.journal import log_transaction
+    log_transaction(
+        transaction_type="refresh",
+        input_data={"notes": notes} if notes else {"file": str(args.file)},
+        memory_before=current_memory,
+        memory_after=result["updated_content"],
+        llm_metadata=result,
+        journal_dir=str(memory_root / "journal"),
+    )
+
     log_session_notes(notes, memory_root / "sessions")
 
     print("done.")
@@ -400,6 +412,17 @@ def _harvest_all(
         else:
             if not args.auto:
                 print("no changes.")
+
+    # Log the transaction for auditability
+    from memsync.journal import log_transaction
+    log_transaction(
+        transaction_type="harvest",
+        input_data={"session_path": str(session_path)} if session_path else {},
+        memory_before=current_memory,
+        memory_after=result["updated_content"],
+        llm_metadata=result,
+        journal_dir=str(memory_root / "journal"),
+    )
 
     # Persist index and write memory once after all sessions processed
     save_harvested_index(memory_root, harvested)
