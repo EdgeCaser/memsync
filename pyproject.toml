@@ -22,6 +22,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
+    "httpx>=0.27",
     "openai>=1.0",
     "google-auth>=2.0",
 ]
