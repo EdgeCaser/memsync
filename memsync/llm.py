@@ -45,7 +45,8 @@ def call_llm(system: str, user: str, prefill: str, config: Config) -> dict:
 # ---------------------------------------------------------------------------
 
 _BACKEND_FNS: dict[str, object] = {
-    "gemini": None,     # filled below after function definitions
+    "gemini": None,       # filled below after function definitions
+    "gemini_cli": None,
     "ollama": None,
     "anthropic": None,
 }
@@ -60,6 +61,7 @@ def _resolve_backends(config: Config) -> list[tuple[str, object]]:
     Set fallback_backend = "none" to disable fallback and hard-error on primary failure.
     """
     _BACKEND_FNS["gemini"] = _call_gemini
+    _BACKEND_FNS["gemini_cli"] = _call_gemini_cli
     _BACKEND_FNS["ollama"] = _call_ollama
     _BACKEND_FNS["anthropic"] = _call_anthropic
 
@@ -156,6 +158,53 @@ def _call_gemini(system: str, user: str, prefill: str, config: Config) -> dict:
         "input_tokens": usage.get("promptTokenCount", 0),
         "output_tokens": usage.get("candidatesTokenCount", 0),
         "truncated": truncated,
+    }
+
+
+def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> dict:
+    """
+    Call Gemini via the installed `gemini` CLI tool (@google/gemini-cli).
+
+    Uses the CLI's own Google account OAuth — no API key required.
+    Prompt is passed via stdin to avoid Windows command line length limits.
+    """
+    import subprocess
+    import sys
+
+    full_prompt = _inject_prefill(system, prefill) + "\n\n" + user
+
+    # -p with a short string triggers headless mode; full content comes from stdin.
+    headless_flag = ["-p", "Process the task from stdin and return only the requested output."]
+
+    if sys.platform == "win32":
+        # On Windows, npm CLI scripts are .cmd files — cmd.exe is required to execute them.
+        cmd = ["cmd.exe", "/c", "gemini", "-m", config.gemini_model, "--yolo"] + headless_flag
+    else:
+        cmd = ["gemini", "-m", config.gemini_model, "--yolo"] + headless_flag
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,
+            input=full_prompt.encode("utf-8"),  # bytes bypasses Windows cp1252 encoding issues
+            capture_output=True,
+            timeout=180,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "gemini CLI not found. Install with: npm install -g @google/gemini-cli"
+        ) from e
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gemini CLI failed (exit {result.returncode}): "
+            f"{result.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+
+    return {
+        "text": result.stdout.decode("utf-8", errors="replace").strip(),
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "truncated": False,
     }
 
 
