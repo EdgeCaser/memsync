@@ -1,4 +1,12 @@
+openai>=1.0
+google-auth>=2.0
+
+[anthropic]
 anthropic>=0.40.0
+
+[daemon]
+apscheduler>=3.10
+flask>=3.0
 
 [dev]
 pytest>=8.0
