@@ -69,7 +69,7 @@ class Config:
     llm_backend: str = "gemini"              # "gemini" | "ollama" | "anthropic"
     fallback_backend: str = "ollama"         # tried when llm_backend fails; "none" to hard-error
     gemini_api_key: str = ""                 # AI Studio key; leave empty to use ADC instead
-    gemini_model: str = "gemini-2.0-flash"    # any model available on your Gemini account
+    gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
     ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     ollama_model: str = "llama3.2:3b"        # ~2GB RAM; good balance of quality and Pi headroom
 
@@ -147,7 +147,7 @@ class Config:
             llm_backend=llm_raw.get("backend", "gemini"),
             fallback_backend=llm_raw.get("fallback_backend", "ollama"),
             gemini_api_key=llm_raw.get("gemini_api_key", ""),
-            gemini_model=llm_raw.get("gemini_model", "gemini-2.0-flash"),
+            gemini_model=llm_raw.get("gemini_model", "gemini-2.5-flash"),
             ollama_base_url=llm_raw.get("ollama_base_url", "http://localhost:11434/v1"),
             ollama_model=llm_raw.get("ollama_model", "llama3.2:3b"),
             sync_root=Path(sync_root) if sync_root else None,
