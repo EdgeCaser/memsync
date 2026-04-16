@@ -368,15 +368,18 @@ def _harvest_all(
             errors += 1
             continue
 
-        append_usage(
-            memory_root,
-            command="harvest",
-            model=config.model,
-            input_tokens=result.get("input_tokens", 0),
-            output_tokens=result.get("output_tokens", 0),
-            session_id=session_path.stem,
-            changed=result.get("changed", False),
-        )
+        try:
+            append_usage(
+                memory_root,
+                command="harvest",
+                model=config.model,
+                input_tokens=result.get("input_tokens", 0),
+                output_tokens=result.get("output_tokens", 0),
+                session_id=session_path.stem,
+                changed=result.get("changed", False),
+            )
+        except OSError as e:
+            logger.warning("Failed to write usage log: %s", e)
 
         if result["truncated"]:
             if not args.auto:
