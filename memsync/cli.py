@@ -1272,6 +1272,39 @@ def cmd_daemon_web(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def cmd_orchestrate(args: argparse.Namespace, config: Config) -> int:
+    """Run the orchestrator with specified scenario class."""
+    import subprocess
+    import shutil
+
+    node_path = shutil.which("node")
+    if not node_path:
+        print("Error: Node.js is not found in your PATH. Please install Node.js to run the orchestrator.", file=sys.stderr)
+        return 1
+
+    script_path = Path(__file__).parent.parent / "scripts" / "run-orchestrated.mjs"
+    if not script_path.exists():
+        print(f"Error: Orchestrator script not found at {script_path}", file=sys.stderr)
+        return 1
+
+    command = [node_path, str(script_path)]
+    if args.scenario_class:
+        command.append(f"--scenario-class={args.scenario_class}")
+    if args.dry_run:
+        command.append("--dry-run")
+    if args.yes:
+        command.append("--yes")
+
+    print(f"Running orchestrator: {' '.join(command)}")
+    try:
+        # Pass through stdin, stdout, stderr
+        process = subprocess.run(command, check=False, text=True, capture_output=False) # noqa: S603
+        return process.returncode
+    except Exception as e:
+        print(f"Error running orchestrator: {e}", file=sys.stderr)
+        return 1
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -1406,6 +1439,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_daemon_web = daemon_sub.add_parser("web", help="Open web UI in browser")
     p_daemon_web.set_defaults(func=cmd_daemon_web)
+
+    # orchestrate
+    p_orchestrate = subparsers.add_parser("orchestrate", help="Run the orchestrator with specified scenario class")
+    p_orchestrate.add_argument("scenario_class", help="The scenario class to run (e.g., governance, pricing)")
+    p_orchestrate.add_argument("--dry-run", action="store_true", help="Perform a dry run without actual execution")
+    p_orchestrate.add_argument("--yes", action="store_true", help="Auto-confirm any escalation prompts")
+    p_orchestrate.set_defaults(func=cmd_orchestrate)
 
     return parser
 
