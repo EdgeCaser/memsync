@@ -379,7 +379,7 @@ def _harvest_all(
                 changed=result.get("changed", False),
             )
         except OSError as e:
-            logger.warning("Failed to write usage log: %s", e)
+            print(f"Warning: failed to write usage log: {e}", file=sys.stderr)
 
         if result["truncated"]:
             if not args.auto:
