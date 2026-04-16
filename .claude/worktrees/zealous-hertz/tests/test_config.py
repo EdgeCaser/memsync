@@ -35,10 +35,6 @@ class TestConfigDefaults:
         assert c.claude_md_target is not None
         assert c.claude_md_target == Path("~/.claude/CLAUDE.md").expanduser()
 
-    def test_default_project_cwd_is_none(self):
-        c = Config()
-        assert c.project_cwd is None
-
 
 class TestConfigPath:
     def test_windows_path_uses_appdata(self, monkeypatch):
@@ -83,22 +79,6 @@ class TestConfigRoundTrip:
         assert loaded.keep_days == 60
         assert loaded.sync_root == tmp_path / "sync"
 
-    def test_project_cwd_save_and_load(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            "memsync.config.get_config_path",
-            lambda: tmp_path / "config.toml",
-        )
-        project_dir = tmp_path / "my_project"
-        project_dir.mkdir()
-        c = Config(
-            provider="icloud",
-            project_cwd=project_dir,
-        )
-        c.save()
-
-        loaded = Config.load()
-        assert loaded.project_cwd == project_dir
-
     def test_load_defaults_when_file_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "memsync.config.get_config_path",
@@ -109,25 +89,14 @@ class TestConfigRoundTrip:
 
     def test_toml_output_is_valid(self):
         import tomllib
-        c = Config(
-            provider="gdrive",
-            keep_days=14,
-            project_cwd=Path("/usr/local/projects/my_code"),
-        )
+        c = Config(provider="gdrive", keep_days=14)
         toml_text = c._to_toml()
         parsed = tomllib.loads(toml_text)
         assert parsed["core"]["provider"] == "gdrive"
         assert parsed["backups"]["keep_days"] == 14
-        assert parsed["paths"]["project_cwd"] == "/usr/local/projects/my_code"
 
     def test_sync_root_serialized_with_forward_slashes(self, tmp_path):
         c = Config(sync_root=tmp_path / "my sync" / "folder")
         toml_text = c._to_toml()
         # Forward slashes in path (TOML-safe)
         assert "\\" not in toml_text.split("sync_root")[1].split("\n")[0]
-
-    def test_project_cwd_serialized_with_forward_slashes(self, tmp_path):
-        c = Config(project_cwd=tmp_path / "another project" / "path")
-        toml_text = c._to_toml()
-        # Forward slashes in path (TOML-safe)
-        assert "\\" not in toml_text.split("project_cwd")[1].split("\n")[0]

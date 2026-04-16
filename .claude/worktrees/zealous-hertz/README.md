@@ -208,17 +208,6 @@ For platform-specific auto-start setup, see [`docs/DAEMON_SETUP.md`](docs/DAEMON
 
 ---
 
-## Claude Integration Enhancements
-
-`memsync` now supports advanced integrations with external tools, such as Slack bots, to provide Claude with enhanced memory and context.
-
--   **Conversation Continuity**: When integrating Claude into conversational platforms (e.g., Slack threads), `memsync` can now manage Claude's session history. This allows Claude to remember previous turns in a conversation, providing a more continuous and coherent interaction experience.
--   **Project Context (`PROJECT_CWD`)**: You can configure a specific project working directory (`PROJECT_CWD`) for Claude. When Claude is invoked from an integrated tool, it will operate within the context of this specified directory. This ensures Claude has access to relevant project files, `CLAUDE.md`, and Git context, enabling it to provide more accurate and context-aware responses.
-
-For detailed setup and configuration of these enhancements, please refer to [`CONFIG.md`](CONFIG.md) for `PROJECT_CWD` settings and [`docs/getting-started.md`](docs/getting-started.md) for integration examples.
-
----
-
 ## Cloud providers
 
 | Provider | macOS | Windows | Linux |

@@ -2,8 +2,7 @@
 
 This guide walks you through installing and using memsync from scratch. It assumes you
 have used a terminal before — you know how to open one and type commands — but no
-Python experience or coding background is required. For a hands-free experience, consider
-installing the daemon automation.
+Python experience or coding background is required.
 
 ---
 
@@ -311,91 +310,14 @@ This checks each component and tells you exactly what's wrong if something isn't
 
 ---
 
-## Automate your memory with the daemon (Recommended)
-
-The daemon is a star feature of memsync, offering a hands-off way to manage your memory.
-Instead of running commands after each session, it runs in the background and keeps your
-memory current automatically.
-
-Install the daemon extras:
-
-```bash
-pip install 'memsync[daemon]'   # quotes required on Mac/zsh
-```
-
-Start it in the background:
-
-```bash
-memsync daemon start --detach
-```
-
-Register it as a system service so it starts automatically on login/boot:
-
-```bash
-memsync daemon install
-```
-
-What runs automatically once the daemon is installed:
-
-| Job | Time | What it does |
-|---|---|---|
-| Harvest | 2:00am | Reads today's session transcripts, extracts memories |
-| Refresh | 11:55pm | Merges notes captured via mobile |
-| Drift check | Every 6h | Alerts if CLAUDE.md is out of sync |
-
-The daemon also starts a **web UI** at `http://localhost:5000` for viewing and editing
-your memory file in a browser, and a **mobile capture endpoint** at port 5001 for
-sending notes from iPhone Shortcuts or any HTTP client.
-
-Other daemon commands:
-
-```bash
-memsync daemon status      # show whether it's running and what's configured
-memsync daemon schedule    # show all jobs and next run times
-memsync daemon stop        # stop the background process
-memsync daemon web         # open the web UI in your browser
-memsync daemon uninstall   # remove the system service registration
-```
-
-For platform-specific setup (launchd on Mac, Task Scheduler on Windows, systemd on
-Linux, or a Raspberry Pi for 24/7 operation), see `docs/DAEMON_SETUP.md`.
-
----
-
-## Advanced Integration & Configuration
-
-`memsync` provides features to enhance Claude's capabilities when integrated with external tools, such as chat bots (e.g., Slack, Discord). These features enable conversation continuity and allow Claude to operate within a specific project context.
-
-### Conversation Continuity
-
-When `memsync` is used with an external tool that interacts with Claude, it can track and manage Claude's session IDs. This means that Claude can maintain awareness of past interactions within a specific thread or conversation, allowing for more coherent and context-aware responses over time.
-
-To leverage conversation continuity, the external integration tool needs to:
-1.  Capture the Claude session ID from `memsync`'s output (usually returned in JSON format).
-2.  Pass this session ID back to `memsync` using the `--resume <session-id>` flag for subsequent interactions within the same conversation thread.
-
-This ensures Claude has access to the full history of the conversation, even across multiple turns.
-
-### Project Context (`PROJECT_CWD`)
-
-For scenarios where Claude needs to operate within the context of a specific codebase or project, you can configure a `PROJECT_CWD` (Project Current Working Directory). This allows Claude to access project-specific files, `CLAUDE.md`, and Git context directly relevant to the task at hand.
-
-To set the `PROJECT_CWD`:
-
-```bash
-memsync config set project_cwd /path/to/your/project/directory
-```
-
-Replace `/path/to/your/project/directory` with the absolute path to your project. When an external tool invokes Claude through `memsync`, and `PROJECT_CWD` is set, Claude will effectively execute within that directory, providing highly relevant insights.
-
-It's crucial for the external tool to be configured to set the working directory for `memsync`'s Claude invocations to match this `PROJECT_CWD` or to pass it explicitly if `memsync` expects it.
-
----
-
 ## Your daily workflow
 
 Once set up, you have two ways to use memsync: **run commands manually** after each
-session, or install the daemon.
+session, or **install the daemon** and let it handle everything automatically.
+
+> **The daemon is the recommended approach.** Once installed, it harvests your sessions
+> every night at 2am without you doing anything. See
+> [Running the daemon](#running-the-daemon-recommended) below.
 
 If you prefer manual control, here's how:
 
@@ -507,6 +429,56 @@ memsync usage
 This shows total calls, token counts, estimated cost, and a breakdown by machine. The
 log lives in your cloud folder so it accumulates across devices. Typical usage is
 around $3–10/month.
+
+---
+
+## Running the daemon (recommended)
+
+The daemon is the hands-off way to use memsync. Instead of running commands after
+each session, it runs in the background and keeps your memory current automatically.
+
+Install the daemon extras:
+
+```bash
+pip install 'memsync[daemon]'   # quotes required on Mac/zsh
+```
+
+Start it in the background:
+
+```bash
+memsync daemon start --detach
+```
+
+Register it as a system service so it starts automatically on login/boot:
+
+```bash
+memsync daemon install
+```
+
+What runs automatically once the daemon is installed:
+
+| Job | Time | What it does |
+|---|---|---|
+| Harvest | 2:00am | Reads today's session transcripts, extracts memories |
+| Refresh | 11:55pm | Merges notes captured via mobile |
+| Drift check | Every 6h | Alerts if CLAUDE.md is out of sync |
+
+The daemon also starts a **web UI** at `http://localhost:5000` for viewing and editing
+your memory file in a browser, and a **mobile capture endpoint** at port 5001 for
+sending notes from iPhone Shortcuts or any HTTP client.
+
+Other daemon commands:
+
+```bash
+memsync daemon status      # show whether it's running and what's configured
+memsync daemon schedule    # show all jobs and next run times
+memsync daemon stop        # stop the background process
+memsync daemon web         # open the web UI in your browser
+memsync daemon uninstall   # remove the system service registration
+```
+
+For platform-specific setup (launchd on Mac, Task Scheduler on Windows, systemd on
+Linux, or a Raspberry Pi for 24/7 operation), see `docs/DAEMON_SETUP.md`.
 
 ---
 
