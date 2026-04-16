@@ -60,23 +60,13 @@ class DaemonConfig:
 class Config:
     # [core]
     provider: str = "onedrive"
-    model: str = "claude-sonnet-4-20250514"   # used only when llm_backend = "anthropic"
+    model: str = "claude-sonnet-4-20250514"
     max_memory_lines: int = 400
-    max_tokens: int = 16384     # API response ceiling — must exceed tokenized memory file size
-    api_key: str = ""           # Anthropic API key (legacy); stored in config.toml, not env
-
-    # [llm] — backend selection and per-backend settings
-    llm_backend: str = "gemini"              # "gemini" | "ollama" | "anthropic"
-    fallback_backend: str = "ollama"         # tried when llm_backend fails; "none" to hard-error
-    gemini_api_key: str = ""                 # AI Studio key; leave empty to use ADC instead
-    gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
-    ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
-    ollama_model: str = "llama3.2:3b"        # ~2GB RAM; good balance of quality and Pi headroom
+    api_key: str = ""           # stored in config.toml (AppData), not in env
 
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
     claude_md_target: Path = None           # set in __post_init__
-    project_cwd: Path | None = None         # Optional: working directory for Claude
 
     # [backups]
     keep_days: int = 30
@@ -106,7 +96,6 @@ class Config:
 
         sync_root = paths.get("sync_root")
         claude_md_target_str = paths.get("claude_md_target")
-        project_cwd_str = paths.get("project_cwd") # Add this line
 
         # Daemon section — only present if user has run 'memsync daemon install'
         daemon_raw = raw.get("daemon", {})
@@ -138,26 +127,14 @@ class Config:
             digest_smtp_password=daemon_raw.get("digest_smtp_password", ""),
         )
 
-        llm_raw = raw.get("llm", {})
-
         instance = cls(
             provider=core.get("provider", "onedrive"),
             model=core.get("model", "claude-sonnet-4-20250514"),
             max_memory_lines=core.get("max_memory_lines", 400),
-            max_tokens=core.get("max_tokens", 16384),
             api_key=core.get("api_key", ""),
-            llm_backend=llm_raw.get("backend", "gemini"),
-            fallback_backend=llm_raw.get("fallback_backend", "ollama"),
-            gemini_api_key=llm_raw.get("gemini_api_key", ""),
-            gemini_model=llm_raw.get("gemini_model", "gemini-2.5-flash"),
-            ollama_base_url=llm_raw.get("ollama_base_url", "http://localhost:11434/v1"),
-            ollama_model=llm_raw.get("ollama_model", "llama3.2:3b"),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
-            ),
-            project_cwd=( # Add this block
-                Path(project_cwd_str).expanduser() if project_cwd_str else None
             ),
             keep_days=backups.get("keep_days", 30),
             daemon=daemon,
@@ -181,7 +158,6 @@ class Config:
             f'provider = "{self.provider}"',
             f'model = "{self.model}"',
             f"max_memory_lines = {self.max_memory_lines}",
-            f"max_tokens = {self.max_tokens}",
         ]
         if self.api_key:
             lines.append(f'api_key = "{self.api_key}"')
@@ -193,23 +169,12 @@ class Config:
         if self.sync_root:
             # TOML strings need forward slashes
             lines.append(f'sync_root = "{self.sync_root.as_posix()}"')
-        if self.project_cwd: # Add this block
-            lines.append(f'project_cwd = "{self.project_cwd.as_posix()}"')
         lines += [
             "",
             "[backups]",
             f"keep_days = {self.keep_days}",
             "",
-            "[llm]",
-            f'backend = "{self.llm_backend}"',
-            f'fallback_backend = "{self.fallback_backend}"',
-            f'gemini_model = "{self.gemini_model}"',
-            f'ollama_base_url = "{self.ollama_base_url}"',
-            f'ollama_model = "{self.ollama_model}"',
         ]
-        if self.gemini_api_key:
-            lines.append(f'gemini_api_key = "{self.gemini_api_key}"')
-        lines.append("")
 
         # Only write [daemon] section if daemon is enabled (i.e. user ran daemon install)
         if self.daemon.enabled:

@@ -7,6 +7,8 @@ import platform
 import sys
 from pathlib import Path
 
+import anthropic
+
 from memsync import __version__
 from memsync.backups import backup, latest_backup, list_backups, prune
 from memsync.claude_md import sync as sync_claude_md
@@ -20,7 +22,6 @@ from memsync.harvest import (
     save_harvested_index,
 )
 from memsync.providers import all_providers, auto_detect, get_provider
-from memsync.llm import LLMError
 from memsync.sync import (
     harvest_memory_content,
     load_or_init_memory,
@@ -241,8 +242,17 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
 
     try:
         result = refresh_memory_content(notes, current_memory, config)
-    except LLMError as e:
-        print(f"\nError: LLM request failed: {e}", file=sys.stderr)
+    except anthropic.BadRequestError as e:
+        if "model" in str(e).lower():
+            print(
+                f"\nError: model '{config.model}' may be unavailable or misspelled.\n"
+                f"Update with: memsync config set model <model-id>",
+                file=sys.stderr,
+            )
+            return 5
+        raise
+    except anthropic.APIError as e:
+        print(f"\nError: API request failed: {e}", file=sys.stderr)
         return 5
 
     append_usage(
@@ -294,18 +304,6 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     backup_path = backup(global_memory, memory_root / "backups")
     global_memory.write_text(result["updated_content"], encoding="utf-8")
     sync_claude_md(global_memory, config.claude_md_target)
-
-    # Log the transaction for auditability
-    from memsync.journal import log_transaction
-    log_transaction(
-        transaction_type="refresh",
-        input_data={"notes": notes} if notes else {"file": str(args.file)},
-        memory_before=current_memory,
-        memory_after=result["updated_content"],
-        llm_metadata=result,
-        journal_dir=str(memory_root / "journal"),
-    )
-
     log_session_notes(notes, memory_root / "sessions")
 
     print("done.")
@@ -363,11 +361,6 @@ def _harvest_all(
         harvested[session_path.stem] = msg_count  # mark regardless of outcome
 
         if not transcript.strip():
-            # If transcript is empty, no meaningful transaction occurred
-            if not args.auto:
-                print(f"  Harvesting {session_path.stem}... (empty transcript) no changes.")
-            # Log usage for empty transcript too, with 0 tokens.
-            # No transaction log needed if transcript is truly empty, as no LLM call.
             continue
 
         if not args.auto:
@@ -378,60 +371,33 @@ def _harvest_all(
             time.sleep(20)
         _first_call = False
 
-        # Initialize result with default values, which will be updated by harvest_memory_content
-        # or error handling.
-        result = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "changed": False,
-            "truncated": False,
-            "malformed": False,
-            "error": None,
-            "updated_content": current_memory # Default to no change if LLM call fails or finds no change
-        }
-
         try:
             result = harvest_memory_content(transcript, current_memory, config)
-        except LLMError as e:
+        except anthropic.APIError as e:
             print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
             errors += 1
-            result["error"] = str(e) # Add error info to result
-            result["malformed"] = True # Treat LLM error as malformed for consistent handling
-            # Do not continue here, allow logging and usage append for the error case
+            continue
 
-        try:
-            append_usage(
-                memory_root,
-                command="harvest",
-                model=config.model,
-                input_tokens=result.get("input_tokens", 0),
-                output_tokens=result.get("output_tokens", 0),
-                session_id=session_path.stem,
-                changed=result.get("changed", False),
-            )
-        except OSError as e:
-            print(f"Warning: failed to write usage log: {e}", file=sys.stderr)
-
-        # Log the transaction for auditability for this specific session
-        from memsync.journal import log_transaction
-        log_transaction(
-            transaction_type="harvest",
-            input_data={"session_path": str(session_path)},
-            memory_before=current_memory,
-            memory_after=result.get("updated_content", current_memory), # Use current_memory if update failed
-            llm_metadata=result,
-            journal_dir=str(memory_root / "journal"),
+        append_usage(
+            memory_root,
+            command="harvest",
+            model=config.model,
+            input_tokens=result.get("input_tokens", 0),
+            output_tokens=result.get("output_tokens", 0),
+            session_id=session_path.stem,
+            changed=result.get("changed", False),
         )
 
         if result["truncated"]:
             if not args.auto:
                 print("truncated — skipped.")
-            continue # Skip further processing for this session
+            continue
 
         if result.get("malformed"):
             if not args.auto:
                 print("malformed response — skipped.")
-            continue # Skip further processing for this session
+            errors += 1
+            continue
 
         if result["changed"]:
             current_memory = result["updated_content"]
@@ -560,8 +526,17 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
 
     try:
         result = harvest_memory_content(transcript, current_memory, config)
-    except LLMError as e:
-        print(f"\nError: LLM request failed: {e}", file=sys.stderr)
+    except anthropic.BadRequestError as e:
+        if "model" in str(e).lower():
+            print(
+                f"\nError: model '{config.model}' may be unavailable or misspelled.\n"
+                f"Update with: memsync config set model <model-id>",
+                file=sys.stderr,
+            )
+            return 5
+        raise
+    except anthropic.APIError as e:
+        print(f"\nError: API request failed: {e}", file=sys.stderr)
         return 5
 
     append_usage(
@@ -711,15 +686,7 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     config_marker = "✓" if config_path.exists() else "✗ (not found — run memsync init)"
     print(f"Config:        {config_path} {config_marker}")
     print(f"Provider:      {config.provider}")
-    print(f"LLM backend:   {config.llm_backend}")
-    if config.llm_backend == "gemini":
-        print(f"LLM model:     {config.gemini_model} (fallback: ollama/{config.ollama_model})")
-    elif config.llm_backend == "gemini_cli":
-        print(f"LLM model:     {config.gemini_model} via gemini CLI (fallback: ollama/{config.ollama_model})")
-    elif config.llm_backend == "ollama":
-        print(f"LLM model:     ollama/{config.ollama_model}")
-    else:
-        print(f"Model:         {config.model}")
+    print(f"Model:         {config.model}")
 
     memory_root = _resolve_memory_root(config)
     if memory_root is None:
@@ -838,58 +805,17 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
     config_path = get_config_path()
     checks.append(("Config file", config_path.exists(), str(config_path)))
 
-    # 2. LLM backend / API key check
-    backend = config.llm_backend
-    if backend == "anthropic":
-        api_key_set = bool(config.api_key) or bool(os.environ.get("ANTHROPIC_API_KEY"))
-        if config.api_key:
-            api_key_detail = "anthropic — key set via config"
-        elif os.environ.get("ANTHROPIC_API_KEY"):
-            api_key_detail = "anthropic — key set via env var (consider: memsync config set api_key <key>)"
-        else:
-            api_key_detail = "anthropic — api_key not set; refresh will fail"
-        checks.append(("LLM / API key", api_key_set, api_key_detail))
-    elif backend == "gemini":
-        if config.gemini_api_key:
-            detail = f"gemini ({config.gemini_model}) — API key configured"
-            checks.append(("LLM / API key", True, detail))
-        else:
-            # No API key — check if ADC credentials are available
-            try:
-                import google.auth
-                google.auth.default(
-                    scopes=["https://www.googleapis.com/auth/generative-language"]
-                )
-                detail = f"gemini ({config.gemini_model}) — ADC (gcloud credentials)"
-                checks.append(("LLM / API key", True, detail))
-            except Exception as _adc_err:  # noqa: BLE001
-                has_fallback = config.fallback_backend and config.fallback_backend != "none"
-                if has_fallback:
-                    detail = (
-                        f"gemini ADC unavailable; will fall back to {config.fallback_backend} "
-                        f"({_adc_err})"
-                    )
-                    checks.append(("LLM / API key", True, detail))
-                else:
-                    detail = f"gemini — no API key, ADC failed, no fallback configured: {_adc_err}"
-                    checks.append(("LLM / API key", False, detail))
-    elif backend == "gemini_cli":
-        import shutil
-        import subprocess as _sp
-        cli_path = shutil.which("gemini") or (
-            # Windows: gemini is a .cmd script, use cmd.exe to locate it
-            _sp.run(["cmd.exe", "/c", "where", "gemini"], capture_output=True, text=True).stdout.strip().splitlines()[0]  # noqa: S603
-            if sys.platform == "win32" else None
+    # 2. API key — prefer config over environment variable
+    api_key_set = bool(config.api_key) or bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if config.api_key:
+        api_key_detail = "set via config (recommended)"
+    elif os.environ.get("ANTHROPIC_API_KEY"):
+        api_key_detail = (
+            "set via ANTHROPIC_API_KEY env var (consider: memsync config set api_key <key>)"
         )
-        cli_ok = bool(cli_path)
-        detail = (
-            f"gemini CLI ({config.gemini_model}) — found at {cli_path}"
-            if cli_ok
-            else "gemini CLI not found — install with: npm install -g @google/gemini-cli"
-        )
-        checks.append(("LLM / gemini CLI", cli_ok, detail))
     else:
-        checks.append(("LLM / API key", True, f"{backend} — no API key required"))
+        api_key_detail = "not set — refresh will fail"
+    checks.append(("API key", api_key_set, api_key_detail))
 
     # 3. Provider / sync root accessible
     if config.sync_root:
@@ -962,8 +888,7 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     valid_keys = {
         "provider", "model", "sync_root", "claude_md_target", "max_memory_lines", "keep_days",
-        "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
-        "ollama_base_url", "ollama_model",
+        "api_key",
     }
     if key not in valid_keys:
         print(
@@ -1011,38 +936,6 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "api_key":
         config = dataclasses.replace(config, api_key=value)
-
-    elif key == "llm_backend":
-        if value not in ("gemini", "gemini_cli", "ollama", "anthropic"):
-            print(
-                f"Error: unknown llm_backend '{value}'.\n"
-                "Valid values: gemini, gemini_cli, ollama, anthropic",
-                file=sys.stderr,
-            )
-            return 1
-        config = dataclasses.replace(config, llm_backend=value)
-
-    elif key == "fallback_backend":
-        if value not in ("gemini", "gemini_cli", "ollama", "anthropic", "none"):
-            print(
-                f"Error: unknown fallback_backend '{value}'.\n"
-                "Valid values: gemini, gemini_cli, ollama, anthropic, none",
-                file=sys.stderr,
-            )
-            return 1
-        config = dataclasses.replace(config, fallback_backend=value)
-
-    elif key == "gemini_api_key":
-        config = dataclasses.replace(config, gemini_api_key=value)
-
-    elif key == "gemini_model":
-        config = dataclasses.replace(config, gemini_model=value)
-
-    elif key == "ollama_base_url":
-        config = dataclasses.replace(config, ollama_base_url=value)
-
-    elif key == "ollama_model":
-        config = dataclasses.replace(config, ollama_model=value)
 
     config.save()
     print(f"Set {key} = {value}")
@@ -1290,39 +1183,6 @@ def cmd_daemon_web(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
-def cmd_orchestrate(args: argparse.Namespace, config: Config) -> int:
-    """Run the orchestrator with specified scenario class."""
-    import subprocess
-    import shutil
-
-    node_path = shutil.which("node")
-    if not node_path:
-        print("Error: Node.js is not found in your PATH. Please install Node.js to run the orchestrator.", file=sys.stderr)
-        return 1
-
-    script_path = Path(__file__).parent.parent / "scripts" / "run-orchestrated.mjs"
-    if not script_path.exists():
-        print(f"Error: Orchestrator script not found at {script_path}", file=sys.stderr)
-        return 1
-
-    command = [node_path, str(script_path)]
-    if args.scenario_class:
-        command.append(f"--scenario-class={args.scenario_class}")
-    if args.dry_run:
-        command.append("--dry-run")
-    if args.yes:
-        command.append("--yes")
-
-    print(f"Running orchestrator: {' '.join(command)}")
-    try:
-        # Pass through stdin, stdout, stderr
-        process = subprocess.run(command, check=False, text=True, capture_output=False) # noqa: S603
-        return process.returncode
-    except Exception as e:
-        print(f"Error running orchestrator: {e}", file=sys.stderr)
-        return 1
-
-
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -1457,13 +1317,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_daemon_web = daemon_sub.add_parser("web", help="Open web UI in browser")
     p_daemon_web.set_defaults(func=cmd_daemon_web)
-
-    # orchestrate
-    p_orchestrate = subparsers.add_parser("orchestrate", help="Run the orchestrator with specified scenario class")
-    p_orchestrate.add_argument("scenario_class", help="The scenario class to run (e.g., governance, pricing)")
-    p_orchestrate.add_argument("--dry-run", action="store_true", help="Perform a dry run without actual execution")
-    p_orchestrate.add_argument("--yes", action="store_true", help="Auto-confirm any escalation prompts")
-    p_orchestrate.set_defaults(func=cmd_orchestrate)
 
     return parser
 

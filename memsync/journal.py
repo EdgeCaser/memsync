@@ -47,11 +47,11 @@ if __name__ == "__main__":
     print("Running example transaction logging...")
     
     example_input_refresh = {"notes": "Added a new thought about AI ethics."}
-    example_memory_before = "Initial memory content.
-"
-    example_memory_after = "Initial memory content.
+    example_memory_before = """Initial memory content.
+"""
+    example_memory_after = """Initial memory content.
 Added a new thought about AI ethics.
-"
+"""
     example_llm_metadata_success = {
         "model": "gemini-pro",
         "prompt_tokens": 100,
@@ -72,11 +72,11 @@ Added a new thought about AI ethics.
     )
 
     example_input_harvest = {"transcript_path": "sessions/20230416_meeting.md"}
-    example_memory_before_harvest = "Memory before harvest.
-"
-    example_memory_after_harvest = "Memory before harvest.
+    example_memory_before_harvest = """Memory before harvest.
+"""
+    example_memory_after_harvest = """Memory before harvest.
 Key points from meeting: AI ethics discussion.
-"
+"""
     example_llm_metadata_failure = {
         "model": "gemini-pro",
         "prompt_tokens": 120,

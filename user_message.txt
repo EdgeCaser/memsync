@@ -1,0 +1,7 @@
+It appears that the files and content described in the summary, specifically 'scripts/orchestrate.mjs' and the variable 'SCENARIO_CLASSES', are not present in the current project context.
+
+I was unable to locate 'orchestrate.mjs' using recursive glob search, and a project-wide grep for 'SCENARIO_CLASSES' also returned no results.
+
+This means I cannot proceed with writing unit tests for 'orchestrate.mjs' as the file itself and its described contents are missing from the current workspace.
+
+Could you please verify that I am in the correct project directory or provide guidance on where to find these files?
