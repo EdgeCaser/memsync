@@ -670,6 +670,8 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     print(f"LLM backend:   {config.llm_backend}")
     if config.llm_backend == "gemini":
         print(f"LLM model:     {config.gemini_model} (fallback: ollama/{config.ollama_model})")
+    elif config.llm_backend == "gemini_cli":
+        print(f"LLM model:     {config.gemini_model} via gemini CLI (fallback: ollama/{config.ollama_model})")
     elif config.llm_backend == "ollama":
         print(f"LLM model:     ollama/{config.ollama_model}")
     else:
@@ -827,6 +829,21 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
                 else:
                     detail = f"gemini — no API key, ADC failed, no fallback configured: {_adc_err}"
                     checks.append(("LLM / API key", False, detail))
+    elif backend == "gemini_cli":
+        import shutil
+        import subprocess as _sp
+        cli_path = shutil.which("gemini") or (
+            # Windows: gemini is a .cmd script, use cmd.exe to locate it
+            _sp.run(["cmd.exe", "/c", "where", "gemini"], capture_output=True, text=True).stdout.strip().splitlines()[0]  # noqa: S603
+            if sys.platform == "win32" else None
+        )
+        cli_ok = bool(cli_path)
+        detail = (
+            f"gemini CLI ({config.gemini_model}) — found at {cli_path}"
+            if cli_ok
+            else "gemini CLI not found — install with: npm install -g @google/gemini-cli"
+        )
+        checks.append(("LLM / gemini CLI", cli_ok, detail))
     else:
         checks.append(("LLM / API key", True, f"{backend} — no API key required"))
 
@@ -952,20 +969,20 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         config = dataclasses.replace(config, api_key=value)
 
     elif key == "llm_backend":
-        if value not in ("gemini", "ollama", "anthropic"):
+        if value not in ("gemini", "gemini_cli", "ollama", "anthropic"):
             print(
                 f"Error: unknown llm_backend '{value}'.\n"
-                "Valid values: gemini, ollama, anthropic",
+                "Valid values: gemini, gemini_cli, ollama, anthropic",
                 file=sys.stderr,
             )
             return 1
         config = dataclasses.replace(config, llm_backend=value)
 
     elif key == "fallback_backend":
-        if value not in ("gemini", "ollama", "anthropic", "none"):
+        if value not in ("gemini", "gemini_cli", "ollama", "anthropic", "none"):
             print(
                 f"Error: unknown fallback_backend '{value}'.\n"
-                "Valid values: gemini, ollama, anthropic, none",
+                "Valid values: gemini, gemini_cli, ollama, anthropic, none",
                 file=sys.stderr,
             )
             return 1
