@@ -136,31 +136,16 @@ class TestLogSessionNotes:
 
 
 class TestRefreshMemoryContent:
-    def _make_mock_response(self, text: str, stop_reason: str = "end_turn",
-                            current_memory: str = SAMPLE_MEMORY) -> MagicMock:
-        """
-        Simulate the API returning a continuation after the prefill.
-
-        With assistant prefill, the API only returns the text *after* the prefill.
-        The code then combines: prefill + response.content[0].text.
-        So the mock must strip the prefill line from the expected output.
-        """
-        from memsync.sync import _build_prefill
-        prefill = _build_prefill(current_memory)
-        if text.startswith(prefill):
-            text = text[len(prefill):]
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=text)]
-        mock_response.stop_reason = stop_reason
-        return mock_response
+    @staticmethod
+    def _llm_result(text: str, truncated: bool = False) -> dict:
+        """Return a call_llm-style result dict."""
+        return {"text": text, "input_tokens": 10, "output_tokens": 20, "truncated": truncated}
 
     def test_returns_changed_true_when_content_differs(self):
         config = Config()
         updated = SAMPLE_MEMORY.replace("- Finish memsync", "- Finish memsync\n- New priority")
-        mock_response = self._make_mock_response(updated)
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        with patch("memsync.sync.call_llm", return_value=self._llm_result(updated)):
             result = refresh_memory_content("Added new priority", SAMPLE_MEMORY, config)
 
         assert result["changed"] is True
@@ -168,41 +153,35 @@ class TestRefreshMemoryContent:
 
     def test_returns_changed_false_when_content_same(self):
         config = Config()
-        mock_response = self._make_mock_response(SAMPLE_MEMORY)
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        with patch("memsync.sync.call_llm", return_value=self._llm_result(SAMPLE_MEMORY)):
             result = refresh_memory_content("Notes", SAMPLE_MEMORY, config)
 
         assert result["changed"] is False
 
     def test_uses_model_from_config(self):
-        config = Config(model="claude-haiku-4-5-20251001")
-        mock_response = self._make_mock_response(SAMPLE_MEMORY)
+        # Model selection is handled inside llm.py; sync.py just passes config through.
+        # Verify call_llm receives the config object (model routing tested in test_llm.py).
+        config = Config(gemini_model="gemini-1.5-pro")
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        with patch("memsync.sync.call_llm", return_value=self._llm_result(SAMPLE_MEMORY)) as mock_llm:
             refresh_memory_content("Notes", SAMPLE_MEMORY, config)
 
-        call_kwargs = mock_client.return_value.messages.create.call_args.kwargs
-        assert call_kwargs["model"] == "claude-haiku-4-5-20251001"
+        _, _, _, passed_config = mock_llm.call_args.args
+        assert passed_config.gemini_model == "gemini-1.5-pro"
 
     def test_detects_truncation_via_stop_reason(self):
         config = Config()
-        mock_response = self._make_mock_response(SAMPLE_MEMORY, stop_reason="max_tokens")
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        with patch("memsync.sync.call_llm", return_value=self._llm_result(SAMPLE_MEMORY, truncated=True)):
             result = refresh_memory_content("Notes", SAMPLE_MEMORY, config)
 
         assert result["truncated"] is True
 
     def test_no_truncation_on_end_turn(self):
         config = Config()
-        mock_response = self._make_mock_response(SAMPLE_MEMORY, stop_reason="end_turn")
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        with patch("memsync.sync.call_llm", return_value=self._llm_result(SAMPLE_MEMORY, truncated=False)):
             result = refresh_memory_content("Notes", SAMPLE_MEMORY, config)
 
         assert result["truncated"] is False
@@ -211,10 +190,8 @@ class TestRefreshMemoryContent:
         config = Config()
         # Model drops one constraint
         without_constraint = SAMPLE_MEMORY.replace("- Never rewrite from scratch\n", "")
-        mock_response = self._make_mock_response(without_constraint)
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        with patch("memsync.sync.call_llm", return_value=self._llm_result(without_constraint)):
             result = refresh_memory_content("Notes", SAMPLE_MEMORY, config)
 
         assert "Never rewrite from scratch" in result["updated_content"]

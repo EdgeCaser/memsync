@@ -7,8 +7,6 @@ import platform
 import sys
 from pathlib import Path
 
-import anthropic
-
 from memsync import __version__
 from memsync.backups import backup, latest_backup, list_backups, prune
 from memsync.claude_md import sync as sync_claude_md
@@ -22,6 +20,7 @@ from memsync.harvest import (
     save_harvested_index,
 )
 from memsync.providers import all_providers, auto_detect, get_provider
+from memsync.llm import LLMError
 from memsync.sync import (
     harvest_memory_content,
     load_or_init_memory,
@@ -242,17 +241,8 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
 
     try:
         result = refresh_memory_content(notes, current_memory, config)
-    except anthropic.BadRequestError as e:
-        if "model" in str(e).lower():
-            print(
-                f"\nError: model '{config.model}' may be unavailable or misspelled.\n"
-                f"Update with: memsync config set model <model-id>",
-                file=sys.stderr,
-            )
-            return 5
-        raise
-    except anthropic.APIError as e:
-        print(f"\nError: API request failed: {e}", file=sys.stderr)
+    except LLMError as e:
+        print(f"\nError: LLM request failed: {e}", file=sys.stderr)
         return 5
 
     append_usage(
@@ -373,7 +363,7 @@ def _harvest_all(
 
         try:
             result = harvest_memory_content(transcript, current_memory, config)
-        except anthropic.APIError as e:
+        except LLMError as e:
             print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
             errors += 1
             continue
@@ -526,17 +516,8 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
 
     try:
         result = harvest_memory_content(transcript, current_memory, config)
-    except anthropic.BadRequestError as e:
-        if "model" in str(e).lower():
-            print(
-                f"\nError: model '{config.model}' may be unavailable or misspelled.\n"
-                f"Update with: memsync config set model <model-id>",
-                file=sys.stderr,
-            )
-            return 5
-        raise
-    except anthropic.APIError as e:
-        print(f"\nError: API request failed: {e}", file=sys.stderr)
+    except LLMError as e:
+        print(f"\nError: LLM request failed: {e}", file=sys.stderr)
         return 5
 
     append_usage(
@@ -686,7 +667,13 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     config_marker = "✓" if config_path.exists() else "✗ (not found — run memsync init)"
     print(f"Config:        {config_path} {config_marker}")
     print(f"Provider:      {config.provider}")
-    print(f"Model:         {config.model}")
+    print(f"LLM backend:   {config.llm_backend}")
+    if config.llm_backend == "gemini":
+        print(f"LLM model:     {config.gemini_model} (fallback: ollama/{config.ollama_model})")
+    elif config.llm_backend == "ollama":
+        print(f"LLM model:     ollama/{config.ollama_model}")
+    else:
+        print(f"Model:         {config.model}")
 
     memory_root = _resolve_memory_root(config)
     if memory_root is None:
@@ -805,17 +792,43 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
     config_path = get_config_path()
     checks.append(("Config file", config_path.exists(), str(config_path)))
 
-    # 2. API key — prefer config over environment variable
-    api_key_set = bool(config.api_key) or bool(os.environ.get("ANTHROPIC_API_KEY"))
-    if config.api_key:
-        api_key_detail = "set via config (recommended)"
-    elif os.environ.get("ANTHROPIC_API_KEY"):
-        api_key_detail = (
-            "set via ANTHROPIC_API_KEY env var (consider: memsync config set api_key <key>)"
-        )
+    # 2. LLM backend / API key check
+    backend = config.llm_backend
+    if backend == "anthropic":
+        api_key_set = bool(config.api_key) or bool(os.environ.get("ANTHROPIC_API_KEY"))
+        if config.api_key:
+            api_key_detail = "anthropic — key set via config"
+        elif os.environ.get("ANTHROPIC_API_KEY"):
+            api_key_detail = "anthropic — key set via env var (consider: memsync config set api_key <key>)"
+        else:
+            api_key_detail = "anthropic — api_key not set; refresh will fail"
+        checks.append(("LLM / API key", api_key_set, api_key_detail))
+    elif backend == "gemini":
+        if config.gemini_api_key:
+            detail = f"gemini ({config.gemini_model}) — API key configured"
+            checks.append(("LLM / API key", True, detail))
+        else:
+            # No API key — check if ADC credentials are available
+            try:
+                import google.auth
+                google.auth.default(
+                    scopes=["https://www.googleapis.com/auth/generative-language"]
+                )
+                detail = f"gemini ({config.gemini_model}) — ADC (gcloud credentials)"
+                checks.append(("LLM / API key", True, detail))
+            except Exception as _adc_err:  # noqa: BLE001
+                has_fallback = config.fallback_backend and config.fallback_backend != "none"
+                if has_fallback:
+                    detail = (
+                        f"gemini ADC unavailable; will fall back to {config.fallback_backend} "
+                        f"({_adc_err})"
+                    )
+                    checks.append(("LLM / API key", True, detail))
+                else:
+                    detail = f"gemini — no API key, ADC failed, no fallback configured: {_adc_err}"
+                    checks.append(("LLM / API key", False, detail))
     else:
-        api_key_detail = "not set — refresh will fail"
-    checks.append(("API key", api_key_set, api_key_detail))
+        checks.append(("LLM / API key", True, f"{backend} — no API key required"))
 
     # 3. Provider / sync root accessible
     if config.sync_root:
@@ -888,7 +901,8 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     valid_keys = {
         "provider", "model", "sync_root", "claude_md_target", "max_memory_lines", "keep_days",
-        "api_key",
+        "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
+        "ollama_base_url", "ollama_model",
     }
     if key not in valid_keys:
         print(
@@ -936,6 +950,38 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "api_key":
         config = dataclasses.replace(config, api_key=value)
+
+    elif key == "llm_backend":
+        if value not in ("gemini", "ollama", "anthropic"):
+            print(
+                f"Error: unknown llm_backend '{value}'.\n"
+                "Valid values: gemini, ollama, anthropic",
+                file=sys.stderr,
+            )
+            return 1
+        config = dataclasses.replace(config, llm_backend=value)
+
+    elif key == "fallback_backend":
+        if value not in ("gemini", "ollama", "anthropic", "none"):
+            print(
+                f"Error: unknown fallback_backend '{value}'.\n"
+                "Valid values: gemini, ollama, anthropic, none",
+                file=sys.stderr,
+            )
+            return 1
+        config = dataclasses.replace(config, fallback_backend=value)
+
+    elif key == "gemini_api_key":
+        config = dataclasses.replace(config, gemini_api_key=value)
+
+    elif key == "gemini_model":
+        config = dataclasses.replace(config, gemini_model=value)
+
+    elif key == "ollama_base_url":
+        config = dataclasses.replace(config, ollama_base_url=value)
+
+    elif key == "ollama_model":
+        config = dataclasses.replace(config, ollama_model=value)
 
     config.save()
     print(f"Set {key} = {value}")
