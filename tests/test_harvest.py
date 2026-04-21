@@ -9,6 +9,7 @@ import pytest
 
 from memsync.config import Config
 from memsync.harvest import (
+    chunk_transcript,
     cwd_to_project_key,
     find_latest_session,
     find_project_dir,
@@ -17,7 +18,11 @@ from memsync.harvest import (
     read_session_transcript,
     save_harvested_index,
 )
-from memsync.sync import harvest_memory_content
+from memsync.sync import (
+    extract_candidates_from_chunk,
+    harvest_memory_content,
+    merge_candidates_into_memory,
+)
 
 SAMPLE_MEMORY = """\
 <!-- memsync v0.2 -->
@@ -314,7 +319,7 @@ class TestHarvestMemoryContent:
         return {"text": text, "input_tokens": 10, "output_tokens": 20, "truncated": truncated}
 
     def test_returns_changed_true_when_content_differs(self):
-        config = Config()
+        config = Config(harvest_chunk_tokens=0)
         updated = SAMPLE_MEMORY.replace("- Finish harvest feature", "- Finish harvest feature\n- Deploy to Pi")
 
         with patch("memsync.sync.call_llm", return_value=self._llm_result(updated)):
@@ -324,7 +329,7 @@ class TestHarvestMemoryContent:
         assert "Deploy to Pi" in result["updated_content"]
 
     def test_returns_changed_false_when_identical(self):
-        config = Config()
+        config = Config(harvest_chunk_tokens=0)
 
         with patch("memsync.sync.call_llm", return_value=self._llm_result(SAMPLE_MEMORY)):
             result = harvest_memory_content("transcript text", SAMPLE_MEMORY, config)
@@ -333,7 +338,7 @@ class TestHarvestMemoryContent:
 
     def test_uses_model_from_config(self):
         # Model selection is handled inside llm.py; sync.py just passes config through.
-        config = Config(gemini_model="gemini-1.5-pro")
+        config = Config(gemini_model="gemini-1.5-pro", harvest_chunk_tokens=0)
 
         with patch("memsync.sync.call_llm", return_value=self._llm_result(SAMPLE_MEMORY)) as mock_llm:
             harvest_memory_content("transcript", SAMPLE_MEMORY, config)
@@ -342,7 +347,7 @@ class TestHarvestMemoryContent:
         assert passed_config.gemini_model == "gemini-1.5-pro"
 
     def test_detects_truncation(self):
-        config = Config()
+        config = Config(harvest_chunk_tokens=0)
 
         with patch("memsync.sync.call_llm", return_value=self._llm_result(SAMPLE_MEMORY, truncated=True)):
             result = harvest_memory_content("transcript", SAMPLE_MEMORY, config)
@@ -350,10 +355,185 @@ class TestHarvestMemoryContent:
         assert result["truncated"] is True
 
     def test_hard_constraints_enforced(self):
-        config = Config()
+        config = Config(harvest_chunk_tokens=0)
         without_constraint = SAMPLE_MEMORY.replace("- Never rewrite from scratch\n", "")
 
         with patch("memsync.sync.call_llm", return_value=self._llm_result(without_constraint)):
             result = harvest_memory_content("transcript", SAMPLE_MEMORY, config)
 
         assert "Never rewrite from scratch" in result["updated_content"]
+
+
+# ---------------------------------------------------------------------------
+# chunk_transcript
+# ---------------------------------------------------------------------------
+
+SEPARATOR = "\n\n---\n\n"
+
+
+def _make_transcript(*turns: str) -> str:
+    return SEPARATOR.join(turns)
+
+
+class TestChunkTranscript:
+    def test_empty_returns_empty_list(self):
+        assert chunk_transcript("", max_tokens=1000) == []
+        assert chunk_transcript("   \n  ", max_tokens=1000) == []
+
+    def test_short_transcript_is_single_chunk(self):
+        t = _make_transcript("[USER]\nHello", "[ASSISTANT]\nHi there")
+        chunks = chunk_transcript(t, max_tokens=1000)
+        assert len(chunks) == 1
+        assert chunks[0] == t
+
+    def test_long_transcript_splits_into_multiple_chunks(self):
+        # Each turn is ~30 chars; max_tokens=5 → max_chars=20. Forces a split after the first turn.
+        turn_a = "[USER]\nHello there"      # 18 chars
+        turn_b = "[ASSISTANT]\nHi back"     # 20 chars
+        turn_c = "[USER]\nThanks a lot"     # 19 chars
+        t = _make_transcript(turn_a, turn_b, turn_c)
+        chunks = chunk_transcript(t, max_tokens=5)  # 20 chars max
+        assert len(chunks) > 1
+
+    def test_chunks_contain_only_whole_turns(self):
+        turns = [f"[USER]\nMessage number {i}" for i in range(10)]
+        t = _make_transcript(*turns)
+        chunks = chunk_transcript(t, max_tokens=10)  # small to force many chunks
+        # Recombine and confirm all turns are present
+        recombined = SEPARATOR.join(chunks)
+        assert recombined == t
+
+    def test_oversized_single_turn_becomes_its_own_chunk(self):
+        # A turn that alone exceeds max_chars must not be dropped.
+        long_turn = "[USER]\n" + "x" * 1000
+        short_turn = "[USER]\nshort"
+        t = _make_transcript(long_turn, short_turn)
+        chunks = chunk_transcript(t, max_tokens=10)  # 40 chars — long_turn alone exceeds this
+        assert len(chunks) == 2
+        assert long_turn in chunks[0]
+        assert short_turn in chunks[1]
+
+    def test_single_turn_is_not_split(self):
+        t = "[USER]\nJust one turn"
+        chunks = chunk_transcript(t, max_tokens=1)  # tiny budget
+        assert len(chunks) == 1
+        assert chunks[0] == t
+
+    def test_no_content_lost_across_chunk_boundary(self):
+        turns = ["[USER]\nA", "[ASSISTANT]\nB", "[USER]\nC", "[ASSISTANT]\nD"]
+        t = _make_transcript(*turns)
+        chunks = chunk_transcript(t, max_tokens=3)  # ~12 chars, forces splits
+        recombined = SEPARATOR.join(chunks)
+        for turn in turns:
+            assert turn in recombined
+
+
+# ---------------------------------------------------------------------------
+# Two-phase chunked harvest
+# ---------------------------------------------------------------------------
+
+class TestChunkedHarvest:
+    @staticmethod
+    def _extract_result(candidates: str = "", tokens: int = 5) -> dict:
+        return {"candidates": candidates, "input_tokens": tokens, "output_tokens": tokens}
+
+    @staticmethod
+    def _llm_result(text: str, truncated: bool = False) -> dict:
+        return {"text": text, "input_tokens": 10, "output_tokens": 10, "truncated": truncated}
+
+    def test_empty_transcript_returns_unchanged(self):
+        config = Config(harvest_chunk_tokens=100)
+        result = harvest_memory_content("", SAMPLE_MEMORY, config)
+        assert result["changed"] is False
+        assert result["input_tokens"] == 0
+
+    def test_short_transcript_still_runs_extract_then_merge(self):
+        # Transcript fits in one chunk → 1 extract call + 1 merge call = 2 total
+        config = Config(harvest_chunk_tokens=6000)
+        updated = SAMPLE_MEMORY.replace("- Finish harvest feature", "- Finish harvest feature\n- New item")
+        call_count = []
+
+        def fake_llm(system, user, prefill, cfg):
+            call_count.append(system[:20])
+            if "scanning" in system.lower():
+                # extract call → return a candidate fact
+                return {"text": "- New item", "input_tokens": 5, "output_tokens": 5, "truncated": False}
+            # merge call → return updated memory
+            return {"text": updated, "input_tokens": 10, "output_tokens": 10, "truncated": False}
+
+        with patch("memsync.sync.call_llm", side_effect=fake_llm):
+            result = harvest_memory_content("[USER]\nDid a thing", SAMPLE_MEMORY, config)
+
+        assert len(call_count) == 2
+        assert result["changed"] is True
+
+    def test_all_chunks_return_none_skips_merge(self):
+        # When every chunk yields no candidates, merge should not be called.
+        config = Config(harvest_chunk_tokens=6000)
+        call_count = []
+
+        def fake_llm(system, user, prefill, cfg):
+            call_count.append(1)
+            return {"text": "NONE", "input_tokens": 3, "output_tokens": 1, "truncated": False}
+
+        with patch("memsync.sync.call_llm", side_effect=fake_llm):
+            result = harvest_memory_content("[USER]\nNothing important", SAMPLE_MEMORY, config)
+
+        # Only the extract call(s) fired; no merge.
+        assert len(call_count) == 1
+        assert result["changed"] is False
+        assert result["input_tokens"] > 0  # extract tokens still counted
+
+    def test_multiple_chunks_each_call_extract(self):
+        # Force 3 chunks with a tiny chunk size.
+        turns = [f"[USER]\n{'word ' * 50}turn {i}" for i in range(3)]
+        transcript = SEPARATOR.join(turns)
+        config = Config(harvest_chunk_tokens=20)  # ~80 chars — each turn forces a new chunk
+
+        extract_calls = []
+        merge_calls = []
+        updated = SAMPLE_MEMORY.replace("- Finish harvest feature", "- Finish harvest feature\n- Done")
+
+        def fake_llm(system, user, prefill, cfg):
+            if "scanning" in system.lower():
+                extract_calls.append(1)
+                return {"text": "- Something happened", "input_tokens": 5, "output_tokens": 3, "truncated": False}
+            merge_calls.append(1)
+            return {"text": updated, "input_tokens": 10, "output_tokens": 10, "truncated": False}
+
+        with patch("memsync.sync.call_llm", side_effect=fake_llm):
+            result = harvest_memory_content(transcript, SAMPLE_MEMORY, config)
+
+        assert len(extract_calls) == 3
+        assert len(merge_calls) == 1
+        assert result["changed"] is True
+        # Token counts accumulate across all calls
+        assert result["input_tokens"] == 3 * 5 + 10
+
+    def test_hard_constraints_enforced_after_merge(self):
+        config = Config(harvest_chunk_tokens=6000)
+        without_constraint = SAMPLE_MEMORY.replace("- Never rewrite from scratch\n", "")
+
+        def fake_llm(system, user, prefill, cfg):
+            if "scanning" in system.lower():
+                return {"text": "- Some new fact", "input_tokens": 3, "output_tokens": 2, "truncated": False}
+            return {"text": without_constraint, "input_tokens": 10, "output_tokens": 10, "truncated": False}
+
+        with patch("memsync.sync.call_llm", side_effect=fake_llm):
+            result = harvest_memory_content("[USER]\nSomething", SAMPLE_MEMORY, config)
+
+        assert "Never rewrite from scratch" in result["updated_content"]
+
+    def test_chunk_tokens_zero_uses_one_shot_path(self):
+        # harvest_chunk_tokens=0 should call LLM exactly once (the original path).
+        config = Config(harvest_chunk_tokens=0)
+        call_count = []
+
+        def fake_llm(system, user, prefill, cfg):
+            call_count.append(1)
+            return {"text": SAMPLE_MEMORY, "input_tokens": 10, "output_tokens": 5, "truncated": False}
+
+        with patch("memsync.sync.call_llm", side_effect=fake_llm):
+            harvest_memory_content("[USER]\nSomething", SAMPLE_MEMORY, config)
+
+        assert len(call_count) == 1

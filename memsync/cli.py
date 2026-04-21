@@ -294,18 +294,6 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     backup_path = backup(global_memory, memory_root / "backups")
     global_memory.write_text(result["updated_content"], encoding="utf-8")
     sync_claude_md(global_memory, config.claude_md_target)
-
-    # Log the transaction for auditability
-    from memsync.journal import log_transaction
-    log_transaction(
-        transaction_type="refresh",
-        input_data={"notes": notes} if notes else {"file": str(args.file)},
-        memory_before=current_memory,
-        memory_after=result["updated_content"],
-        llm_metadata=result,
-        journal_dir=str(memory_root / "journal"),
-    )
-
     log_session_notes(notes, memory_root / "sessions")
 
     print("done.")
@@ -360,14 +348,9 @@ def _harvest_all(
 
     for session_path in new_sessions:
         transcript, msg_count = read_session_transcript(session_path)
-        harvested[session_path.stem] = msg_count  # mark regardless of outcome
 
         if not transcript.strip():
-            # If transcript is empty, no meaningful transaction occurred
-            if not args.auto:
-                print(f"  Harvesting {session_path.stem}... (empty transcript) no changes.")
-            # Log usage for empty transcript too, with 0 tokens.
-            # No transaction log needed if transcript is truly empty, as no LLM call.
+            harvested[session_path.stem] = msg_count  # empty transcripts won't improve on retry
             continue
 
         if not args.auto:
@@ -378,26 +361,14 @@ def _harvest_all(
             time.sleep(20)
         _first_call = False
 
-        # Initialize result with default values, which will be updated by harvest_memory_content
-        # or error handling.
-        result = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "changed": False,
-            "truncated": False,
-            "malformed": False,
-            "error": None,
-            "updated_content": current_memory # Default to no change if LLM call fails or finds no change
-        }
-
         try:
             result = harvest_memory_content(transcript, current_memory, config)
         except LLMError as e:
             print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
             errors += 1
-            result["error"] = str(e) # Add error info to result
-            result["malformed"] = True # Treat LLM error as malformed for consistent handling
-            # Do not continue here, allow logging and usage append for the error case
+            continue  # not marked — will retry on next run
+
+        harvested[session_path.stem] = msg_count
 
         try:
             append_usage(
@@ -410,34 +381,27 @@ def _harvest_all(
                 changed=result.get("changed", False),
             )
         except OSError as e:
-            print(f"Warning: failed to write usage log: {e}", file=sys.stderr)
-
-        # Log the transaction for auditability for this specific session
-        from memsync.journal import log_transaction
-        log_transaction(
-            transaction_type="harvest",
-            input_data={"session_path": str(session_path)},
-            memory_before=current_memory,
-            memory_after=result.get("updated_content", current_memory), # Use current_memory if update failed
-            llm_metadata=result,
-            journal_dir=str(memory_root / "journal"),
-        )
+            logger.warning("Failed to write usage log: %s", e)
 
         if result["truncated"]:
             if not args.auto:
                 print("truncated — skipped.")
-            continue # Skip further processing for this session
+            continue
 
         if result.get("malformed"):
             if not args.auto:
                 print("malformed response — skipped.")
-            continue # Skip further processing for this session
+            errors += 1
+            continue
 
         if result["changed"]:
             current_memory = result["updated_content"]
             changed_any = True
             if not args.auto:
-                print("updated.")
+                backend = result.get("backend", "unknown")
+                chunks = result.get("chunks_processed", 1)
+                tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
+                print(f"updated. [{backend}, {chunks} chunk(s), {tokens} tokens]")
         else:
             if not args.auto:
                 print("no changes.")
@@ -963,7 +927,8 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
     valid_keys = {
         "provider", "model", "sync_root", "claude_md_target", "max_memory_lines", "keep_days",
         "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
-        "ollama_base_url", "ollama_model",
+        "ollama_base_url", "ollama_model", "ollama_timeout", "ollama_num_ctx",
+        "harvest_chunk_tokens", "chunk_inter_call_sleep",
     }
     if key not in valid_keys:
         print(
@@ -1043,6 +1008,39 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "ollama_model":
         config = dataclasses.replace(config, ollama_model=value)
+
+    elif key in ("ollama_timeout", "ollama_num_ctx"):
+        try:
+            ivalue = int(value)
+        except ValueError:
+            print(f"Error: {key} must be an integer, got '{value}'.", file=sys.stderr)
+            return 1
+        if ivalue <= 0:
+            print(f"Error: {key} must be positive, got {ivalue}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, **{key: ivalue})
+
+    elif key == "harvest_chunk_tokens":
+        try:
+            ivalue = int(value)
+        except ValueError:
+            print(f"Error: harvest_chunk_tokens must be an integer, got '{value}'.", file=sys.stderr)
+            return 1
+        if ivalue < 0:
+            print(f"Error: harvest_chunk_tokens must be >= 0 (0 = one-shot mode), got {ivalue}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, harvest_chunk_tokens=ivalue)
+
+    elif key == "chunk_inter_call_sleep":
+        try:
+            ivalue = int(value)
+        except ValueError:
+            print(f"Error: chunk_inter_call_sleep must be an integer, got '{value}'.", file=sys.stderr)
+            return 1
+        if ivalue < 0:
+            print(f"Error: chunk_inter_call_sleep must be >= 0 (0 = no sleep), got {ivalue}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, chunk_inter_call_sleep=ivalue)
 
     config.save()
     print(f"Set {key} = {value}")
@@ -1290,39 +1288,6 @@ def cmd_daemon_web(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
-def cmd_orchestrate(args: argparse.Namespace, config: Config) -> int:
-    """Run the orchestrator with specified scenario class."""
-    import subprocess
-    import shutil
-
-    node_path = shutil.which("node")
-    if not node_path:
-        print("Error: Node.js is not found in your PATH. Please install Node.js to run the orchestrator.", file=sys.stderr)
-        return 1
-
-    script_path = Path(__file__).parent.parent / "scripts" / "run-orchestrated.mjs"
-    if not script_path.exists():
-        print(f"Error: Orchestrator script not found at {script_path}", file=sys.stderr)
-        return 1
-
-    command = [node_path, str(script_path)]
-    if args.scenario_class:
-        command.append(f"--scenario-class={args.scenario_class}")
-    if args.dry_run:
-        command.append("--dry-run")
-    if args.yes:
-        command.append("--yes")
-
-    print(f"Running orchestrator: {' '.join(command)}")
-    try:
-        # Pass through stdin, stdout, stderr
-        process = subprocess.run(command, check=False, text=True, capture_output=False) # noqa: S603
-        return process.returncode
-    except Exception as e:
-        print(f"Error running orchestrator: {e}", file=sys.stderr)
-        return 1
-
-
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -1457,13 +1422,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_daemon_web = daemon_sub.add_parser("web", help="Open web UI in browser")
     p_daemon_web.set_defaults(func=cmd_daemon_web)
-
-    # orchestrate
-    p_orchestrate = subparsers.add_parser("orchestrate", help="Run the orchestrator with specified scenario class")
-    p_orchestrate.add_argument("scenario_class", help="The scenario class to run (e.g., governance, pricing)")
-    p_orchestrate.add_argument("--dry-run", action="store_true", help="Perform a dry run without actual execution")
-    p_orchestrate.add_argument("--yes", action="store_true", help="Auto-confirm any escalation prompts")
-    p_orchestrate.set_defaults(func=cmd_orchestrate)
 
     return parser
 

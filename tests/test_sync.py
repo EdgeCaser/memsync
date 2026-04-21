@@ -6,7 +6,6 @@ import pytest
 
 from memsync.config import Config
 from memsync.sync import (
-    _chunk_transcript,
     _extract_constraints,
     enforce_hard_constraints,
     harvest_memory_content,
@@ -197,87 +196,3 @@ class TestRefreshMemoryContent:
             result = refresh_memory_content("Notes", SAMPLE_MEMORY, config)
 
         assert "Never rewrite from scratch" in result["updated_content"]
-
-
-class TestChunkTranscript:
-    def test_small_transcript_stays_single(self):
-        transcript = "[USER]\nHello\n\n---\n\n[ASSISTANT]\nHi there"
-        chunks = _chunk_transcript(transcript)
-        assert len(chunks) == 1
-        assert chunks[0] == transcript
-
-    def test_large_transcript_splits(self):
-        # Build a transcript larger than CHUNK_SIZE
-        turns = [f"[USER]\n{'x' * 2000}" for _ in range(10)]
-        transcript = "\n\n---\n\n".join(turns)
-        chunks = _chunk_transcript(transcript)
-        assert len(chunks) > 1
-        # Reconstructing should give back the original
-        reconstructed = "\n\n---\n\n".join(chunks)
-        assert reconstructed == transcript
-
-    def test_single_huge_turn_gets_own_chunk(self):
-        small = "[USER]\nSmall turn"
-        huge = "[USER]\n" + "x" * 20000
-        transcript = f"{small}\n\n---\n\n{huge}\n\n---\n\n{small}"
-        chunks = _chunk_transcript(transcript)
-        # The huge turn should be isolated
-        assert any(len(c) > 20000 for c in chunks)
-
-
-class TestHarvestChunked:
-    @staticmethod
-    def _llm_result(text: str, truncated: bool = False) -> dict:
-        return {"text": text, "input_tokens": 10, "output_tokens": 20, "truncated": truncated}
-
-    def test_small_transcript_uses_single_path(self):
-        config = Config()
-        short = "[USER]\nDid something small"
-        updated = SAMPLE_MEMORY.replace("- Finish memsync", "- Finish memsync\n- Small thing done")
-
-        with patch("memsync.sync.call_llm", return_value=self._llm_result(updated)) as mock:
-            result = harvest_memory_content(short, SAMPLE_MEMORY, config)
-
-        assert result["changed"] is True
-        # Should only call LLM once (single path, not chunked)
-        assert mock.call_count == 1
-
-    def test_large_transcript_uses_chunked_path(self):
-        config = Config()
-        # Build transcript > CHUNK_THRESHOLD
-        turns = [f"[USER]\n{'discussion ' * 200}" for _ in range(10)]
-        transcript = "\n\n---\n\n".join(turns)
-        assert len(transcript) > 8000
-
-        extract_result = self._llm_result("- Found something notable")
-        merge_result = self._llm_result(
-            SAMPLE_MEMORY.replace("- Finish memsync", "- Finish memsync\n- Found something notable")
-        )
-
-        call_count = [0]
-        def fake_llm(system, user, prefill, cfg):
-            call_count[0] += 1
-            # Last call is the merge pass
-            if "CURRENT GLOBAL MEMORY:" in user:
-                return merge_result
-            return extract_result
-
-        with patch("memsync.sync.call_llm", side_effect=fake_llm):
-            result = harvest_memory_content(transcript, SAMPLE_MEMORY, config)
-
-        assert result["changed"] is True
-        # Multiple extraction calls + 1 merge call
-        assert call_count[0] > 2
-
-    def test_chunked_nothing_notable_returns_unchanged(self):
-        config = Config()
-        turns = [f"[USER]\n{'chatter ' * 200}" for _ in range(10)]
-        transcript = "\n\n---\n\n".join(turns)
-
-        nothing_result = self._llm_result("NOTHING_NOTABLE")
-
-        with patch("memsync.sync.call_llm", return_value=nothing_result):
-            result = harvest_memory_content(transcript, SAMPLE_MEMORY, config)
-
-        assert result["changed"] is False
-        assert result["malformed"] is False

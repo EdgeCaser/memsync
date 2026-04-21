@@ -216,6 +216,7 @@ def _call_ollama(system: str, user: str, prefill: str, config: Config) -> dict:
     client = openai.OpenAI(
         api_key="ollama",  # required by the openai client, not validated by Ollama
         base_url=config.ollama_base_url,
+        timeout=config.ollama_timeout,
     )
 
     response = client.chat.completions.create(
@@ -225,7 +226,7 @@ def _call_ollama(system: str, user: str, prefill: str, config: Config) -> dict:
             {"role": "system", "content": _inject_prefill(system, prefill)},
             {"role": "user", "content": user},
         ],
-        extra_body={"options": {"num_ctx": 32768}},  # expand context window beyond 8K default
+        extra_body={"options": {"num_ctx": config.ollama_num_ctx}},
     )
 
     choice = response.choices[0]

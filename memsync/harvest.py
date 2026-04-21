@@ -159,3 +159,49 @@ def save_harvested_index(memory_root: Path, harvested: dict[str, int]) -> None:
         json.dumps(harvested, indent=2, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
+
+
+# ---------------------------------------------------------------------------
+# Transcript chunking
+# ---------------------------------------------------------------------------
+
+def chunk_transcript(transcript: str, max_tokens: int) -> list[str]:
+    """
+    Split a transcript (produced by read_session_transcript) into chunks where
+    each chunk contains at most max_tokens estimated tokens.
+
+    Uses a 4 chars/token heuristic — accurate enough for chunking boundaries
+    without requiring a tokenizer dependency.
+
+    Splits only on turn boundaries (the separator between turns is never broken)
+    so each chunk contains only whole turns. A single turn that exceeds max_tokens
+    is kept as its own chunk — it cannot be split further without losing coherence.
+
+    Returns [] for empty/whitespace-only input, otherwise at least one element.
+    """
+    if not transcript.strip():
+        return []
+
+    SEPARATOR = "\n\n---\n\n"
+    max_chars = max_tokens * 4
+    turns = transcript.split(SEPARATOR)
+
+    chunks: list[str] = []
+    current_turns: list[str] = []
+    current_chars = 0
+
+    for turn in turns:
+        # Cost of appending this turn to the current chunk (separator + content)
+        added_chars = (len(SEPARATOR) if current_turns else 0) + len(turn)
+        if current_turns and current_chars + added_chars > max_chars:
+            chunks.append(SEPARATOR.join(current_turns))
+            current_turns = [turn]
+            current_chars = len(turn)
+        else:
+            current_turns.append(turn)
+            current_chars += added_chars
+
+    if current_turns:
+        chunks.append(SEPARATOR.join(current_turns))
+
+    return chunks
