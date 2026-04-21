@@ -922,7 +922,7 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
     valid_keys = {
         "provider", "model", "sync_root", "claude_md_target", "max_memory_lines", "keep_days",
         "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
-        "ollama_base_url", "ollama_model",
+        "ollama_base_url", "ollama_model", "ollama_timeout", "ollama_num_ctx",
     }
     if key not in valid_keys:
         print(
@@ -1002,6 +1002,17 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "ollama_model":
         config = dataclasses.replace(config, ollama_model=value)
+
+    elif key in ("ollama_timeout", "ollama_num_ctx"):
+        try:
+            ivalue = int(value)
+        except ValueError:
+            print(f"Error: {key} must be an integer, got '{value}'.", file=sys.stderr)
+            return 1
+        if ivalue <= 0:
+            print(f"Error: {key} must be positive, got {ivalue}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, **{key: ivalue})
 
     config.save()
     print(f"Set {key} = {value}")
