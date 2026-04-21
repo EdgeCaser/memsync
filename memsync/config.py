@@ -72,6 +72,8 @@ class Config:
     gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
     ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     ollama_model: str = "llama3.2:3b"        # ~2GB RAM; good balance of quality and Pi headroom
+    ollama_timeout: int = 120                # seconds; caps fallback burn time on weak hardware
+    ollama_num_ctx: int = 8192               # context window; 32K OOMs the 1b on an 8GB Pi
 
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
@@ -150,6 +152,8 @@ class Config:
             gemini_model=llm_raw.get("gemini_model", "gemini-2.5-flash"),
             ollama_base_url=llm_raw.get("ollama_base_url", "http://localhost:11434/v1"),
             ollama_model=llm_raw.get("ollama_model", "llama3.2:3b"),
+            ollama_timeout=llm_raw.get("ollama_timeout", 120),
+            ollama_num_ctx=llm_raw.get("ollama_num_ctx", 8192),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -199,6 +203,8 @@ class Config:
             f'gemini_model = "{self.gemini_model}"',
             f'ollama_base_url = "{self.ollama_base_url}"',
             f'ollama_model = "{self.ollama_model}"',
+            f"ollama_timeout = {self.ollama_timeout}",
+            f"ollama_num_ctx = {self.ollama_num_ctx}",
         ]
         if self.gemini_api_key:
             lines.append(f'gemini_api_key = "{self.gemini_api_key}"')
