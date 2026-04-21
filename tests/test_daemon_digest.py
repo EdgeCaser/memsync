@@ -5,6 +5,7 @@ API calls are always mocked — no real Claude API calls in tests.
 """
 from __future__ import annotations
 
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -58,8 +59,9 @@ class TestGenerateDigest:
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text="Weekly summary text")]
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        mock_anthropic = MagicMock()
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+        with patch.dict(sys.modules, {"anthropic": mock_anthropic}):
             result = generate_digest(digest_memory_root, Config())
 
         assert result == "Weekly summary text"
@@ -71,8 +73,9 @@ class TestGenerateDigest:
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text="summary")]
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        mock_anthropic = MagicMock()
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+        with patch.dict(sys.modules, {"anthropic": mock_anthropic}):
             result = generate_digest(digest_memory_root, Config())
 
         # Today is in the 7-day window (week_ago + 7 days = today)
@@ -86,11 +89,13 @@ class TestGenerateDigest:
         mock_response.content = [MagicMock(text="summary")]
         config = Config(model="claude-haiku-4-5-20251001")
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        mock_anthropic = MagicMock()
+        mock_client = mock_anthropic.Anthropic.return_value
+        mock_client.messages.create.return_value = mock_response
+        with patch.dict(sys.modules, {"anthropic": mock_anthropic}):
             generate_digest(digest_memory_root, config)
 
-        call_kwargs = mock_client.return_value.messages.create.call_args[1]
+        call_kwargs = mock_client.messages.create.call_args[1]
         assert call_kwargs["model"] == "claude-haiku-4-5-20251001"
 
 
@@ -103,8 +108,9 @@ class TestGenerateAndSend:
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text="Weekly digest text")]
 
-        with patch("anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create.return_value = mock_response
+        mock_anthropic = MagicMock()
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+        with patch.dict(sys.modules, {"anthropic": mock_anthropic}):
             with patch("memsync.daemon.notify._send_email") as mock_email:
                 generate_and_send(digest_config)
 
