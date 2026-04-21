@@ -226,7 +226,10 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
     candidate_blocks: list[str] = []
     last_backend = "unknown"
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
+        if i > 0 and config.chunk_inter_call_sleep > 0:
+            import time
+            time.sleep(config.chunk_inter_call_sleep)
         result = extract_candidates_from_chunk(chunk, config)
         total_input += result["input_tokens"]
         total_output += result["output_tokens"]
