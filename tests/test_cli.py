@@ -604,7 +604,8 @@ class TestDaemonCLIGuard:
             pass
 
         monkeypatch.setattr("memsync.cli._PID_FILE", tmp_path / "nonexistent.pid")
-        result = cmd_daemon_status(FakeArgs(), config)
+        with patch("memsync.cli._daemon_import_guard", return_value=True):
+            result = cmd_daemon_status(FakeArgs(), config)
         out = capsys.readouterr().out
         assert result == 0
         assert "not running" in out.lower()
@@ -616,8 +617,17 @@ class TestDaemonCLIGuard:
         class FakeArgs:
             pass
 
-        # daemon extras installed, config has refresh enabled — should show jobs
-        result = cmd_daemon_schedule(FakeArgs(), config)
+        fake_job = MagicMock()
+        fake_job.name = "Nightly refresh"
+        fake_job.id = "nightly_refresh"
+        fake_job.next_run_time = None
+        fake_scheduler = MagicMock()
+        fake_scheduler.get_jobs.return_value = [fake_job]
+        fake_module = MagicMock()
+        fake_module.build_scheduler.return_value = fake_scheduler
+        with patch.dict(sys.modules, {"memsync.daemon.scheduler": fake_module}):
+            with patch("memsync.cli._daemon_import_guard", return_value=True):
+                result = cmd_daemon_schedule(FakeArgs(), config)
         capsys.readouterr()
         assert result == 0
 
@@ -652,8 +662,9 @@ class TestDaemonCLIGuard:
         class FakeArgs:
             pass
 
-        with patch("webbrowser.open") as mock_open:
-            result = cmd_daemon_web(FakeArgs(), config)
+        with patch("memsync.cli._daemon_import_guard", return_value=True):
+            with patch("webbrowser.open") as mock_open:
+                result = cmd_daemon_web(FakeArgs(), config)
         assert result == 0
         mock_open.assert_called_once()
 
@@ -1790,8 +1801,11 @@ class TestDaemonImportGuardExtras:
         from memsync.cli import cmd_daemon_schedule
         fake_scheduler = MagicMock()
         fake_scheduler.get_jobs.return_value = []
-        with patch("memsync.daemon.scheduler.build_scheduler", return_value=fake_scheduler):
-            result = cmd_daemon_schedule(object(), config)
+        fake_module = MagicMock()
+        fake_module.build_scheduler.return_value = fake_scheduler
+        with patch.dict(sys.modules, {"memsync.daemon.scheduler": fake_module}):
+            with patch("memsync.cli._daemon_import_guard", return_value=True):
+                result = cmd_daemon_schedule(object(), config)
         out = capsys.readouterr().out
         assert result == 0
         assert "No jobs" in out
@@ -1904,14 +1918,15 @@ class TestCmdDaemonStatusWithPid:
         pid_file.write_text("12345", encoding="utf-8")
         monkeypatch.setattr("memsync.cli._PID_FILE", pid_file)
 
-        if platform.system() == "Windows":
-            mock_result = MagicMock()
-            mock_result.stdout = "12345 python.exe"
-            with patch("subprocess.run", return_value=mock_result):
-                result = cmd_daemon_status(object(), config)
-        else:
-            with patch("os.kill", return_value=None):
-                result = cmd_daemon_status(object(), config)
+        with patch("memsync.cli._daemon_import_guard", return_value=True):
+            if platform.system() == "Windows":
+                mock_result = MagicMock()
+                mock_result.stdout = "12345 python.exe"
+                with patch("subprocess.run", return_value=mock_result):
+                    result = cmd_daemon_status(object(), config)
+            else:
+                with patch("os.kill", return_value=None):
+                    result = cmd_daemon_status(object(), config)
 
         out = capsys.readouterr().out
         assert result == 0
@@ -1924,14 +1939,15 @@ class TestCmdDaemonStatusWithPid:
         pid_file.write_text("12345", encoding="utf-8")
         monkeypatch.setattr("memsync.cli._PID_FILE", pid_file)
 
-        if platform.system() == "Windows":
-            mock_result = MagicMock()
-            mock_result.stdout = "no match here"
-            with patch("subprocess.run", return_value=mock_result):
-                result = cmd_daemon_status(object(), config)
-        else:
-            with patch("os.kill", side_effect=ProcessLookupError()):
-                result = cmd_daemon_status(object(), config)
+        with patch("memsync.cli._daemon_import_guard", return_value=True):
+            if platform.system() == "Windows":
+                mock_result = MagicMock()
+                mock_result.stdout = "no match here"
+                with patch("subprocess.run", return_value=mock_result):
+                    result = cmd_daemon_status(object(), config)
+            else:
+                with patch("os.kill", side_effect=ProcessLookupError()):
+                    result = cmd_daemon_status(object(), config)
 
         out = capsys.readouterr().out
         assert result == 0
