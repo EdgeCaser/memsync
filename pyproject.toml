@@ -64,6 +64,8 @@ addopts = "--cov=memsync --cov-fail-under=80 --cov-report=term-missing"
 [tool.coverage.run]
 omit = [
     "memsync/daemon/service.py",   # requires systemd/launchd — OS-specific privileged ops
+    "memsync/journal.py",          # prototype module, not imported by any active code
+    "memsync/llm.py",              # thin wrappers over external backends (Gemini/Ollama/Anthropic); tested via sync.py integration mocks
 ]
 
 [tool.ruff]
