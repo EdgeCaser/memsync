@@ -77,7 +77,9 @@ def _resolve_backends(config: Config) -> list[tuple[str, object]]:
 
     if fallback and fallback != "none" and fallback != primary:
         if fallback not in _BACKEND_FNS:
-            raise LLMError(f"Unknown fallback_backend '{fallback}'. Valid: {', '.join(_BACKEND_FNS)}")
+            raise LLMError(
+                f"Unknown fallback_backend '{fallback}'. Valid: {', '.join(_BACKEND_FNS)}"
+            )
         chain.append((fallback, _BACKEND_FNS[fallback]))
 
     return chain

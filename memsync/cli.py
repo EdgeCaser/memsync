@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import difflib
+import logging
 import platform
 import sys
 from pathlib import Path
@@ -19,8 +20,8 @@ from memsync.harvest import (
     read_session_transcript,
     save_harvested_index,
 )
-from memsync.providers import all_providers, auto_detect, get_provider
 from memsync.llm import LLMError
+from memsync.providers import all_providers, auto_detect, get_provider
 from memsync.sync import (
     harvest_memory_content,
     load_or_init_memory,
@@ -28,6 +29,8 @@ from memsync.sync import (
     refresh_memory_content,
 )
 from memsync.usage import append_usage, format_summary, load_usage, usage_log_path
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -679,7 +682,10 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     if config.llm_backend == "gemini":
         print(f"LLM model:     {config.gemini_model} (fallback: ollama/{config.ollama_model})")
     elif config.llm_backend == "gemini_cli":
-        print(f"LLM model:     {config.gemini_model} via gemini CLI (fallback: ollama/{config.ollama_model})")
+        print(
+            f"LLM model:     {config.gemini_model} via gemini CLI"
+            f" (fallback: ollama/{config.ollama_model})"
+        )
     elif config.llm_backend == "ollama":
         print(f"LLM model:     ollama/{config.ollama_model}")
     else:
@@ -809,7 +815,9 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
         if config.api_key:
             api_key_detail = "anthropic — key set via config"
         elif os.environ.get("ANTHROPIC_API_KEY"):
-            api_key_detail = "anthropic — key set via env var (consider: memsync config set api_key <key>)"
+            api_key_detail = (
+                "anthropic — key set via env var (consider: memsync config set api_key <key>)"
+            )
         else:
             api_key_detail = "anthropic — api_key not set; refresh will fail"
         checks.append(("LLM / API key", api_key_set, api_key_detail))
@@ -842,7 +850,9 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
         import subprocess as _sp
         cli_path = shutil.which("gemini") or (
             # Windows: gemini is a .cmd script, use cmd.exe to locate it
-            _sp.run(["cmd.exe", "/c", "where", "gemini"], capture_output=True, text=True).stdout.strip().splitlines()[0]  # noqa: S603
+            _sp.run(  # noqa: S603
+                ["cmd.exe", "/c", "where", "gemini"], capture_output=True, text=True
+            ).stdout.strip().splitlines()[0]
             if sys.platform == "win32" else None
         )
         cli_ok = bool(cli_path)
@@ -1024,10 +1034,14 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         try:
             ivalue = int(value)
         except ValueError:
-            print(f"Error: harvest_chunk_tokens must be an integer, got '{value}'.", file=sys.stderr)
+            print(f"Error: harvest_chunk_tokens must be an integer, got {value!r}.",
+                  file=sys.stderr)
             return 1
         if ivalue < 0:
-            print(f"Error: harvest_chunk_tokens must be >= 0 (0 = one-shot mode), got {ivalue}.", file=sys.stderr)
+            print(
+                f"Error: harvest_chunk_tokens must be >= 0 (0 = one-shot mode), got {ivalue}.",
+                file=sys.stderr,
+            )
             return 1
         config = dataclasses.replace(config, harvest_chunk_tokens=ivalue)
 
@@ -1035,10 +1049,14 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         try:
             ivalue = int(value)
         except ValueError:
-            print(f"Error: chunk_inter_call_sleep must be an integer, got '{value}'.", file=sys.stderr)
+            print(f"Error: chunk_inter_call_sleep must be an integer, got {value!r}.",
+                  file=sys.stderr)
             return 1
         if ivalue < 0:
-            print(f"Error: chunk_inter_call_sleep must be >= 0 (0 = no sleep), got {ivalue}.", file=sys.stderr)
+            print(
+                f"Error: chunk_inter_call_sleep must be >= 0 (0 = no sleep), got {ivalue}.",
+                file=sys.stderr,
+            )
             return 1
         config = dataclasses.replace(config, chunk_inter_call_sleep=ivalue)
 

@@ -211,14 +211,17 @@ def job_nightly_harvest(config: Config) -> None:
             transcript, message_count = read_session_transcript(session_path)
 
             if not transcript.strip():
-                harvested[session_path.stem] = message_count  # empty transcripts won't improve on retry
-                logger.debug("nightly_harvest: empty transcript in %s, skipping", session_path.stem)
+                harvested[session_path.stem] = message_count  # empty; won't improve on retry
+                logger.debug("nightly_harvest: empty transcript in %s, skipping", session_path.stem)  # noqa: E501
                 continue
 
             try:
                 result = harvest_memory_content(transcript, current_memory, config)
             except Exception:
-                logger.warning("nightly_harvest: all backends failed for %s — will retry next run", session_path.stem)
+                logger.warning(
+                    "nightly_harvest: all backends failed for %s — will retry next run",
+                    session_path.stem,
+                )
                 continue  # not marked — will retry on next run
 
             harvested[session_path.stem] = message_count
