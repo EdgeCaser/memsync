@@ -74,6 +74,7 @@ class Config:
     ollama_model: str = "llama3.2:3b"        # ~2GB RAM; good balance of quality and Pi headroom
     ollama_timeout: int = 120                # seconds; caps fallback burn time on weak hardware
     ollama_num_ctx: int = 8192               # context window; 32K OOMs the 1b on an 8GB Pi
+    harvest_chunk_tokens: int = 6000         # split transcripts into chunks this size; 0 = one-shot
 
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
@@ -154,6 +155,7 @@ class Config:
             ollama_model=llm_raw.get("ollama_model", "llama3.2:3b"),
             ollama_timeout=llm_raw.get("ollama_timeout", 120),
             ollama_num_ctx=llm_raw.get("ollama_num_ctx", 8192),
+            harvest_chunk_tokens=llm_raw.get("harvest_chunk_tokens", 6000),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -205,6 +207,7 @@ class Config:
             f'ollama_model = "{self.ollama_model}"',
             f"ollama_timeout = {self.ollama_timeout}",
             f"ollama_num_ctx = {self.ollama_num_ctx}",
+            f"harvest_chunk_tokens = {self.harvest_chunk_tokens}",
         ]
         if self.gemini_api_key:
             lines.append(f'gemini_api_key = "{self.gemini_api_key}"')

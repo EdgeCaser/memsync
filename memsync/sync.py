@@ -25,6 +25,7 @@ RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."
 
 # Harvest prompt: reads a full session transcript and extracts what's worth keeping.
 # Deliberately separate from SYSTEM_PROMPT — different task, different tuning surface.
+# See PITFALLS.md #8 before editing — specific phrases matter.
 HARVEST_SYSTEM_PROMPT = """You are maintaining a persistent global memory file for an AI assistant user.
 This file is loaded at the start of every Claude Code session, on every machine and project.
 It is the user's identity layer — not project docs, not cold storage.
@@ -47,14 +48,60 @@ Then merge those extractions into the existing memory file:
 
 RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
 
+# Two-phase chunked harvest prompts. See PITFALLS.md #8 — load-bearing phrases preserved.
+EXTRACT_SYSTEM_PROMPT = """You are scanning a segment of a conversation transcript for facts worth adding to a persistent memory file.
+
+Extract only facts a person would want recalled in a future AI session:
+- Decisions made or approaches chosen
+- Work completed or milestones reached
+- Preferences or constraints the user expressed
+- Problems solved and how they were resolved
+- Project or priority status changes
+
+Return a bullet list (one fact per line, starting with "- ").
+If nothing in this segment is worth persisting, return exactly: NONE
+
+RETURN: Only the bullet list or NONE. No explanation, no preamble."""
+
+MERGE_SYSTEM_PROMPT = """You are maintaining a persistent global memory file for an AI assistant user.
+This file is loaded at the start of every Claude Code session, on every machine and project.
+It is the user's identity layer — not project docs, not cold storage.
+
+You will receive a list of candidate facts extracted from a recent session. Merge them into the memory file:
+- Keep the file tight (under 400 lines)
+- Update facts that have changed
+- Demote completed items from "Current priorities" to a brief "Recent completions" section
+- Preserve the user's exact voice, formatting, and section structure
+- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- If none of the candidates add meaningful new information, return the file UNCHANGED
+
+RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
+
 
 def harvest_memory_content(transcript: str, current_memory: str, config: Config) -> dict:
     """
-    Call the configured LLM to extract memories from a session transcript and merge
-    them into current_memory.
-    Returns a dict with keys: updated_content (str), changed (bool), truncated (bool).
+    Extract memories from a session transcript and merge them into current_memory.
+
+    When config.harvest_chunk_tokens > 0 (default 6000), uses a two-phase approach:
+      1. Split transcript into chunks, extract candidate facts from each via LLM.
+      2. Merge all candidates into current_memory in a single LLM call.
+    This keeps every LLM call under the token limit, avoiding rate-limit fallback
+    to local Ollama with oversized prompts.
+
+    When harvest_chunk_tokens == 0, falls back to the original single-shot path
+    (full transcript in one call).
+
+    Returns a dict with keys: updated_content, changed, truncated, malformed,
+    input_tokens, output_tokens.
     Does NOT write files — caller handles I/O.
     """
+    if config.harvest_chunk_tokens > 0:
+        return _harvest_chunked(transcript, current_memory, config)
+    return _harvest_one_shot(transcript, current_memory, config)
+
+
+def _harvest_one_shot(transcript: str, current_memory: str, config: Config) -> dict:
+    """Original single-shot path: sends full transcript in one LLM call."""
     user_prompt = f"""\
 CURRENT GLOBAL MEMORY:
 {current_memory}
@@ -88,6 +135,107 @@ SESSION TRANSCRIPT:
         "input_tokens": llm_result["input_tokens"],
         "output_tokens": llm_result["output_tokens"],
     }
+
+
+def extract_candidates_from_chunk(chunk: str, config: Config) -> dict:
+    """
+    Call LLM to extract memory-worthy facts from one transcript chunk.
+
+    Returns {"candidates": str, "input_tokens": int, "output_tokens": int}.
+    candidates is "" if the model found nothing worth persisting.
+    """
+    user_prompt = f"TRANSCRIPT SEGMENT:\n{chunk}"
+    llm_result = call_llm(EXTRACT_SYSTEM_PROMPT, user_prompt, "", config)
+    text = llm_result["text"].strip()
+    candidates = "" if not text or text.upper() == "NONE" else text
+    return {
+        "candidates": candidates,
+        "input_tokens": llm_result["input_tokens"],
+        "output_tokens": llm_result["output_tokens"],
+    }
+
+
+def merge_candidates_into_memory(candidates: str, current_memory: str, config: Config) -> dict:
+    """
+    Merge a bullet list of extracted candidate facts into current_memory via LLM.
+    Returns the same dict shape as harvest_memory_content (without token counts,
+    which the caller accumulates across all extract calls).
+    """
+    user_prompt = f"""\
+CURRENT GLOBAL MEMORY:
+{current_memory}
+
+CANDIDATE FACTS:
+{candidates}"""
+
+    prefill = _build_prefill(current_memory)
+    llm_result = call_llm(MERGE_SYSTEM_PROMPT, user_prompt, prefill, config)
+    updated_content = _strip_model_wrapper(llm_result["text"])
+
+    if not _looks_like_memory_file(updated_content):
+        return {
+            "updated_content": updated_content,
+            "changed": False,
+            "truncated": False,
+            "malformed": True,
+            "input_tokens": llm_result["input_tokens"],
+            "output_tokens": llm_result["output_tokens"],
+        }
+
+    updated_content = enforce_hard_constraints(current_memory, updated_content)
+    changed = updated_content != current_memory.strip()
+
+    return {
+        "updated_content": updated_content,
+        "changed": changed,
+        "truncated": llm_result["truncated"],
+        "malformed": False,
+        "input_tokens": llm_result["input_tokens"],
+        "output_tokens": llm_result["output_tokens"],
+    }
+
+
+def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> dict:
+    """Two-phase chunked harvest: extract candidates per chunk, then one merge call."""
+    from memsync.harvest import chunk_transcript
+
+    chunks = chunk_transcript(transcript, config.harvest_chunk_tokens)
+    if not chunks:
+        return {
+            "updated_content": current_memory.strip(),
+            "changed": False,
+            "truncated": False,
+            "malformed": False,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+
+    total_input = 0
+    total_output = 0
+    candidate_blocks: list[str] = []
+
+    for chunk in chunks:
+        result = extract_candidates_from_chunk(chunk, config)
+        total_input += result["input_tokens"]
+        total_output += result["output_tokens"]
+        if result["candidates"]:
+            candidate_blocks.append(result["candidates"])
+
+    if not candidate_blocks:
+        return {
+            "updated_content": current_memory.strip(),
+            "changed": False,
+            "truncated": False,
+            "malformed": False,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+        }
+
+    combined_candidates = "\n".join(candidate_blocks)
+    merge_result = merge_candidates_into_memory(combined_candidates, current_memory, config)
+    merge_result["input_tokens"] += total_input
+    merge_result["output_tokens"] += total_output
+    return merge_result
 
 
 def _build_prefill(current_memory: str) -> str:
