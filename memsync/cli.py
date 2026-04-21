@@ -923,6 +923,7 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         "provider", "model", "sync_root", "claude_md_target", "max_memory_lines", "keep_days",
         "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
         "ollama_base_url", "ollama_model", "ollama_timeout", "ollama_num_ctx",
+        "harvest_chunk_tokens",
     }
     if key not in valid_keys:
         print(
@@ -1013,6 +1014,17 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
             print(f"Error: {key} must be positive, got {ivalue}.", file=sys.stderr)
             return 1
         config = dataclasses.replace(config, **{key: ivalue})
+
+    elif key == "harvest_chunk_tokens":
+        try:
+            ivalue = int(value)
+        except ValueError:
+            print(f"Error: harvest_chunk_tokens must be an integer, got '{value}'.", file=sys.stderr)
+            return 1
+        if ivalue < 0:
+            print(f"Error: harvest_chunk_tokens must be >= 0 (0 = one-shot mode), got {ivalue}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, harvest_chunk_tokens=ivalue)
 
     config.save()
     print(f"Set {key} = {value}")
