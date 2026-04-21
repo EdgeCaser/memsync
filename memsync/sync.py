@@ -92,7 +92,7 @@ def harvest_memory_content(transcript: str, current_memory: str, config: Config)
     (full transcript in one call).
 
     Returns a dict with keys: updated_content, changed, truncated, malformed,
-    input_tokens, output_tokens.
+    input_tokens, output_tokens, backend, chunks_processed.
     Does NOT write files — caller handles I/O.
     """
     if config.harvest_chunk_tokens > 0:
@@ -122,6 +122,8 @@ SESSION TRANSCRIPT:
             "malformed": True,
             "input_tokens": llm_result["input_tokens"],
             "output_tokens": llm_result["output_tokens"],
+            "backend": llm_result.get("backend", "unknown"),
+            "chunks_processed": 1,
         }
 
     updated_content = enforce_hard_constraints(current_memory, updated_content)
@@ -134,6 +136,8 @@ SESSION TRANSCRIPT:
         "malformed": False,
         "input_tokens": llm_result["input_tokens"],
         "output_tokens": llm_result["output_tokens"],
+        "backend": llm_result.get("backend", "unknown"),
+        "chunks_processed": 1,
     }
 
 
@@ -152,6 +156,7 @@ def extract_candidates_from_chunk(chunk: str, config: Config) -> dict:
         "candidates": candidates,
         "input_tokens": llm_result["input_tokens"],
         "output_tokens": llm_result["output_tokens"],
+        "backend": llm_result.get("backend", "unknown"),
     }
 
 
@@ -180,6 +185,7 @@ CANDIDATE FACTS:
             "malformed": True,
             "input_tokens": llm_result["input_tokens"],
             "output_tokens": llm_result["output_tokens"],
+            "backend": llm_result.get("backend", "unknown"),
         }
 
     updated_content = enforce_hard_constraints(current_memory, updated_content)
@@ -192,6 +198,7 @@ CANDIDATE FACTS:
         "malformed": False,
         "input_tokens": llm_result["input_tokens"],
         "output_tokens": llm_result["output_tokens"],
+        "backend": llm_result.get("backend", "unknown"),
     }
 
 
@@ -200,6 +207,8 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
     from memsync.harvest import chunk_transcript
 
     chunks = chunk_transcript(transcript, config.harvest_chunk_tokens)
+    n_chunks = len(chunks)
+
     if not chunks:
         return {
             "updated_content": current_memory.strip(),
@@ -208,16 +217,20 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
             "malformed": False,
             "input_tokens": 0,
             "output_tokens": 0,
+            "backend": "none",
+            "chunks_processed": 0,
         }
 
     total_input = 0
     total_output = 0
     candidate_blocks: list[str] = []
+    last_backend = "unknown"
 
     for chunk in chunks:
         result = extract_candidates_from_chunk(chunk, config)
         total_input += result["input_tokens"]
         total_output += result["output_tokens"]
+        last_backend = result.get("backend", last_backend)
         if result["candidates"]:
             candidate_blocks.append(result["candidates"])
 
@@ -229,12 +242,16 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
             "malformed": False,
             "input_tokens": total_input,
             "output_tokens": total_output,
+            "backend": last_backend,
+            "chunks_processed": n_chunks,
         }
 
     combined_candidates = "\n".join(candidate_blocks)
     merge_result = merge_candidates_into_memory(combined_candidates, current_memory, config)
     merge_result["input_tokens"] += total_input
     merge_result["output_tokens"] += total_output
+    merge_result["chunks_processed"] = n_chunks
+    # backend from merge call wins (most representative — if it fell back, this shows it)
     return merge_result
 
 
