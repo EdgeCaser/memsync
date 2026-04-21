@@ -396,7 +396,10 @@ def _harvest_all(
             current_memory = result["updated_content"]
             changed_any = True
             if not args.auto:
-                print("updated.")
+                backend = result.get("backend", "unknown")
+                chunks = result.get("chunks_processed", 1)
+                tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
+                print(f"updated. [{backend}, {chunks} chunk(s), {tokens} tokens]")
         else:
             if not args.auto:
                 print("no changes.")

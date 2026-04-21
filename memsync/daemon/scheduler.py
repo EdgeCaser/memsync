@@ -227,7 +227,13 @@ def job_nightly_harvest(config: Config) -> None:
             if result["changed"]:
                 current_memory = result["updated_content"]
                 changed_any = True
-                logger.debug("nightly_harvest: memory updated from session %s", session_path.stem)
+                backend = result.get("backend", "unknown")
+                chunks = result.get("chunks_processed", 1)
+                tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
+                logger.info(
+                    "nightly_harvest: updated from %s [%s, %d chunk(s), %d tokens]",
+                    session_path.stem, backend, chunks, tokens,
+                )
 
         # Persist index and write memory once after all sessions processed
         save_harvested_index(memory_root, harvested)
