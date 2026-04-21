@@ -27,6 +27,7 @@ env/
 .env.local
 *.local.json
 .claude/settings.local.json
+.claude/worktrees/
 
 # macOS
 .DS_Store
