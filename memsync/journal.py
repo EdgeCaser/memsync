@@ -3,6 +3,7 @@ import json
 import os
 from datetime import datetime
 
+
 def log_transaction(
     transaction_type: str,
     input_data: dict,
@@ -25,7 +26,7 @@ def log_transaction(
     os.makedirs(journal_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     transaction_id = f"{transaction_type}_{timestamp}"
-    
+
     log_entry = {
         "transaction_id": transaction_id,
         "timestamp": datetime.now().isoformat(),
@@ -45,7 +46,7 @@ def log_transaction(
 if __name__ == "__main__":
     # Example usage for testing
     print("Running example transaction logging...")
-    
+
     example_input_refresh = {"notes": "Added a new thought about AI ethics."}
     example_memory_before = """Initial memory content.
 """
@@ -61,7 +62,7 @@ Added a new thought about AI ethics.
         "truncated": False,
         "malformed": False,
     }
-    
+
     log_transaction(
         transaction_type="refresh",
         input_data=example_input_refresh,

@@ -11,8 +11,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
-import anthropic
-
 from memsync.config import Config
 
 DIGEST_SYSTEM_PROMPT = (
@@ -65,6 +63,7 @@ def generate_digest(memory_root: Path, config: Config) -> str:
 
     all_notes = "\n\n".join(session_logs)
 
+    import anthropic  # optional daemon extra — lazy import keeps base install clean
     client = anthropic.Anthropic()
     response = client.messages.create(
         model=config.model,
