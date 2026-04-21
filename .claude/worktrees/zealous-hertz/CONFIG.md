@@ -37,11 +37,6 @@ max_memory_lines = 400                    # soft cap passed to the refresh promp
 # a non-standard Claude Code install.
 claude_md_target = "~/.claude/CLAUDE.md"
 
-# Specifies a project working directory for Claude. When Claude is invoked from
-# an integrated tool (e.g., a Slack bot), it will operate within this directory.
-# This grants Claude access to relevant project files, CLAUDE.md, and Git context.
-# project_cwd = "/path/to/your/project"
-
 [backups]
 keep_days = 30
 
@@ -79,7 +74,6 @@ class Config:
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
     claude_md_target: Path = Path("~/.claude/CLAUDE.md")
-    project_cwd: Path | None = None         # Optional: working directory for Claude
 
     # [backups]
     keep_days: int = 30
@@ -101,14 +95,12 @@ class Config:
 
         sync_root = paths.get("sync_root")
         claude_md_target = paths.get("claude_md_target", "~/.claude/CLAUDE.md")
-        project_cwd = paths.get("project_cwd")
         return cls(
             provider=core.get("provider", "onedrive"),
             model=core.get("model", "claude-sonnet-4-20250514"),
             max_memory_lines=core.get("max_memory_lines", 400),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=Path(claude_md_target).expanduser(),
-            project_cwd=Path(project_cwd).expanduser() if project_cwd else None,
             keep_days=backups.get("keep_days", 30),
         )
 
@@ -135,8 +127,6 @@ class Config:
         if self.sync_root:
             # TOML strings need forward slashes or escaped backslashes
             lines.append(f'sync_root = "{self.sync_root.as_posix()}"')
-        if self.project_cwd:
-            lines.append(f'project_cwd = "{self.project_cwd.as_posix()}"')
         lines += [
             "",
             "[backups]",
@@ -232,7 +222,6 @@ Valid keys for `memsync config set`:
 - `model` — any string (validated on first API call with friendly error)
 - `sync_root` — path, must exist
 - `claude_md_target` — path to write CLAUDE.md (default: `~/.claude/CLAUDE.md`)
-- `project_cwd` — path to the project working directory for Claude
 - `max_memory_lines` — integer
 - `keep_days` — integer
 

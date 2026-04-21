@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memsync session extractor — install</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; background: #0d0d1a; color: #e0e0e0; line-height: 1.6; }
+  h1 { font-size: 1.3rem; color: #fff; }
+  h2 { font-size: 1.1rem; color: #ccc; margin-top: 2rem; }
+  a.bookmarklet { display: inline-block; background: #2563eb; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 1rem; margin: 1rem 0; }
+  a.bookmarklet:active { background: #1d4ed8; }
+  .steps { padding-left: 1.2rem; }
+  .steps li { margin-bottom: 0.8rem; }
+  code { background: #1a1a2e; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+  .config { background: #1a1a2e; border: 1px solid #333; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+  .config label { display: block; margin-bottom: 0.5rem; font-size: 0.85rem; color: #999; }
+  .config input { width: 100%; background: #0d0d1a; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 0.9rem; box-sizing: border-box; }
+  .config input::placeholder { color: #555; }
+  button.generate { background: #059669; color: #fff; border: none; border-radius: 6px; padding: 10px 20px; cursor: pointer; font-size: 0.95rem; margin-top: 0.5rem; }
+  .note { font-size: 0.85rem; color: #888; margin-top: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>memsync session extractor</h1>
+<p>Extracts Claude Code remote session transcripts from <code>claude.ai/code</code> for memsync.</p>
+
+<h2>Desktop (Chrome/Edge)</h2>
+<p>Drag this link to your bookmarks bar:</p>
+<p><a class="bookmarklet" id="desktop-link" href="#">Extract for memsync</a></p>
+
+<h2>iPhone (Safari)</h2>
+<ol class="steps">
+  <li>Bookmark this page (tap Share → Add Bookmark).</li>
+  <li>Edit the bookmark — replace the URL with the text in the box below.</li>
+  <li>To use: open a <code>claude.ai/code</code> session, tap the bookmark.</li>
+</ol>
+<textarea id="bookmarklet-text" readonly style="width:100%;height:100px;background:#0d0d1a;color:#c0c0c0;border:1px solid #333;border-radius:8px;padding:12px;font-family:monospace;font-size:11px;resize:none;box-sizing:border-box;" onclick="this.select()"></textarea>
+
+<h2>Configuration (optional)</h2>
+<div class="config">
+  <label>Capture endpoint URL <span style="color:#666">(leave empty for clipboard-only mode)</span></label>
+  <input type="text" id="cfg-url" placeholder="http://pi.local:5001/note">
+  <label style="margin-top:0.8rem;">Auth token <span style="color:#666">(if capture_token is set in daemon config)</span></label>
+  <input type="text" id="cfg-token" placeholder="(none)">
+  <button class="generate" onclick="rebuild()">Update bookmarklet</button>
+  <p class="note">After updating, re-drag the link above or re-copy the text for iPhone.</p>
+</div>
+
+<h2>What it does</h2>
+<ol class="steps">
+  <li>Clicks all "Show more" buttons to expand truncated messages.</li>
+  <li>Extracts every message, labeling each as <code>[USER]</code> or <code>[ASSISTANT]</code>.</li>
+  <li>If a capture URL is configured, POSTs the transcript to your memsync daemon.</li>
+  <li>Otherwise, copies to clipboard (or shows a text box on iPhone).</li>
+</ol>
+
+<script>
+var BASE_CODE = `(function(){\"use strict\";var MEMSYNC_CAPTURE_URL=\"%%URL%%\";var MEMSYNC_TOKEN=\"%%TOKEN%%\";var showMoreBtns=Array.from(document.querySelectorAll(\"button\")).filter(function(b){return b.textContent.trim()===\"Show more\"});if(showMoreBtns.length>0){showMoreBtns.forEach(function(b){b.click()});setTimeout(extractAndDeliver,800)}else{extractAndDeliver()}function extractAndDeliver(){var containers=document.querySelectorAll('[class*=\"group/message\"]');if(!containers.length){window.alert(\"No messages found. Are you on a claude.ai/code session page?\");return}var turns=[];containers.forEach(function(el){var parent=el.parentElement;var isUser=parent&&/items-end/.test(parent.className)&&/ml-auto/.test(parent.className);var role=isUser?\"USER\":\"ASSISTANT\";var text=el.textContent.replace(/Copy message/g,\"\").replace(/Copy code/g,\"\").replace(/Show more/g,\"\").replace(/Show less/g,\"\").replace(/\\\\s+/g,\" \").trim();if(!text)return;turns.push(\"[\"+role+\"]\\\\n\"+text)});if(!turns.length){window.alert(\"Could not extract any messages from this page.\");return}var urlMatch=window.location.pathname.match(/session_([A-Za-z0-9]+)/);var sessionId=urlMatch?urlMatch[1]:\"unknown\";var timestamp=new Date().toISOString().slice(0,19).replace(\"T\",\" \");var header=\"# Claude Code remote session transcript\\\\n# Extracted: \"+timestamp+\"\\\\n# Session: \"+sessionId+\"\\\\n# URL: \"+window.location.href+\"\\\\n# Messages: \"+turns.length+\"\\\\n\\\\n\";var transcript=header+turns.join(\"\\\\n\\\\n---\\\\n\\\\n\");if(MEMSYNC_CAPTURE_URL){var headers={\"Content-Type\":\"application/json\"};if(MEMSYNC_TOKEN){headers[\"X-Memsync-Token\"]=MEMSYNC_TOKEN}fetch(MEMSYNC_CAPTURE_URL,{method:\"POST\",headers:headers,body:JSON.stringify({text:transcript})}).then(function(r){return r.json()}).then(function(data){if(data.ok){window.alert(\"memsync: captured \"+turns.length+\" messages (\"+data.timestamp+\")\")}else{throw new Error(data.error||\"unknown error\")}}).catch(function(err){copyAndNotify(transcript,turns.length,\"POST failed (\"+err.message+\"), copied to clipboard instead.\")})}else{copyAndNotify(transcript,turns.length,\"Copied \"+turns.length+\" messages to clipboard.\")}}function copyAndNotify(text,count,message){if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){window.alert(\"memsync: \"+message)}).catch(function(){showCopyFallback(text,count)})}else{showCopyFallback(text,count)}}function showCopyFallback(text,count){var overlay=document.createElement(\"div\");overlay.style.cssText=\"position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:20px;\";var box=document.createElement(\"div\");box.style.cssText=\"background:#1a1a2e;color:#e0e0e0;border-radius:12px;padding:20px;max-width:600px;width:100%;max-height:80vh;display:flex;flex-direction:column;gap:12px;font-family:system-ui;\";var title=document.createElement(\"div\");title.style.cssText=\"font-size:16px;font-weight:600;\";title.textContent=\"memsync: \"+count+\" messages extracted\";var hint=document.createElement(\"div\");hint.style.cssText=\"font-size:13px;color:#999;\";hint.textContent=\"Select all and copy, then run: memsync refresh --file <paste>\";var ta=document.createElement(\"textarea\");ta.style.cssText=\"width:100%;height:300px;background:#0d0d1a;color:#c0c0c0;border:1px solid #333;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;resize:none;\";ta.value=text;ta.readOnly=true;var closeBtn=document.createElement(\"button\");closeBtn.style.cssText=\"align-self:flex-end;background:#333;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:14px;\";closeBtn.textContent=\"Close\";closeBtn.onclick=function(){overlay.remove()};box.appendChild(title);box.appendChild(hint);box.appendChild(ta);box.appendChild(closeBtn);overlay.appendChild(box);document.body.appendChild(overlay);ta.focus();ta.select()}})()`;
+
+function rebuild() {
+  var url = document.getElementById("cfg-url").value.trim();
+  var token = document.getElementById("cfg-token").value.trim();
+  var code = BASE_CODE.replace("%%URL%%", url).replace("%%TOKEN%%", token);
+  var bm = "javascript:" + code;
+  document.getElementById("desktop-link").href = bm;
+  document.getElementById("bookmarklet-text").value = bm;
+}
+
+rebuild();
+</script>
+</body>
+</html>

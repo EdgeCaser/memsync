@@ -1,0 +1,12 @@
+{
+  "runId": "run-1776378228429",
+  "scenarioClass": "pricing",
+  "mode": "single_analysis",
+  "decisions": [
+    {
+      "timestamp": "2026-04-16T22:23:48.434Z",
+      "type": "initial_mode_selection",
+      "mode": "single_analysis"
+    }
+  ]
+}
