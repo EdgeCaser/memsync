@@ -1,18 +1,10 @@
 from __future__ import annotations
 
-import logging
 import re
 from pathlib import Path
 
 from memsync.config import Config
 from memsync.llm import call_llm
-
-logger = logging.getLogger(__name__)
-
-# Transcripts larger than this (in chars) are split into chunks.
-# ~8K chars ≈ ~2K tokens — conservative to leave room for memory + system prompt.
-CHUNK_THRESHOLD = 8000
-CHUNK_SIZE = 8000
 
 # The system prompt is load-bearing — see PITFALLS.md #8 before editing.
 # Specific phrases matter; don't casually reword them.
@@ -33,6 +25,7 @@ RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."
 
 # Harvest prompt: reads a full session transcript and extracts what's worth keeping.
 # Deliberately separate from SYSTEM_PROMPT — different task, different tuning surface.
+# See PITFALLS.md #8 before editing — specific phrases matter.
 HARVEST_SYSTEM_PROMPT = """You are maintaining a persistent global memory file for an AI assistant user.
 This file is loaded at the start of every Claude Code session, on every machine and project.
 It is the user's identity layer — not project docs, not cold storage.
@@ -55,79 +48,60 @@ Then merge those extractions into the existing memory file:
 
 RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
 
-# Extraction prompt for chunked processing — extracts bullet-point notes, not a full file.
-CHUNK_EXTRACT_PROMPT = """You are extracting memorable facts from a conversation transcript chunk.
+# Two-phase chunked harvest prompts. See PITFALLS.md #8 — load-bearing phrases preserved.
+EXTRACT_SYSTEM_PROMPT = """You are scanning a segment of a conversation transcript for facts worth adding to a persistent memory file.
 
-Extract ONLY facts worth adding to a persistent memory file:
-- Decisions made, approaches chosen, or things agreed upon
-- Work completed, milestones reached, or features shipped
-- Problems solved and how they were resolved
+Extract only facts a person would want recalled in a future AI session:
+- Decisions made or approaches chosen
+- Work completed or milestones reached
 - Preferences or constraints the user expressed
+- Problems solved and how they were resolved
 - Project or priority status changes
 
-Return a bullet-point list of extracted facts. One bullet per fact.
-If the chunk contains nothing worth persisting, return exactly: NOTHING_NOTABLE
+Return a bullet list (one fact per line, starting with "- ").
+If nothing in this segment is worth persisting, return exactly: NONE
 
-RETURN: Only the bullet list. No explanation, no preamble."""
+RETURN: Only the bullet list or NONE. No explanation, no preamble."""
 
+MERGE_SYSTEM_PROMPT = """You are maintaining a persistent global memory file for an AI assistant user.
+This file is loaded at the start of every Claude Code session, on every machine and project.
+It is the user's identity layer — not project docs, not cold storage.
 
-def _chunk_transcript(transcript: str) -> list[str]:
-    """
-    Split a transcript into chunks at turn boundaries (--- separators).
-    Each chunk stays under CHUNK_SIZE chars. If a single turn exceeds
-    CHUNK_SIZE, it gets its own chunk (unavoidable).
-    """
-    turns = transcript.split("\n\n---\n\n")
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
+You will receive a list of candidate facts extracted from a recent session. Merge them into the memory file:
+- Keep the file tight (under 400 lines)
+- Update facts that have changed
+- Demote completed items from "Current priorities" to a brief "Recent completions" section
+- Preserve the user's exact voice, formatting, and section structure
+- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- If none of the candidates add meaningful new information, return the file UNCHANGED
 
-    for turn in turns:
-        turn_len = len(turn) + 7  # account for separator
-        if current and current_len + turn_len > CHUNK_SIZE:
-            chunks.append("\n\n---\n\n".join(current))
-            current = [turn]
-            current_len = turn_len
-        else:
-            current.append(turn)
-            current_len += turn_len
-
-    if current:
-        chunks.append("\n\n---\n\n".join(current))
-
-    return chunks
-
-
-def _extract_from_chunk(chunk: str, config: Config) -> tuple[str, int, int]:
-    """
-    Extract notable facts from a single transcript chunk.
-    Returns (extracted_notes, input_tokens, output_tokens).
-    """
-    llm_result = call_llm(CHUNK_EXTRACT_PROMPT, chunk, "", config)
-    text = llm_result["text"].strip()
-    if text == "NOTHING_NOTABLE":
-        text = ""
-    return text, llm_result["input_tokens"], llm_result["output_tokens"]
+RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
 
 
 def harvest_memory_content(transcript: str, current_memory: str, config: Config) -> dict:
     """
-    Call the configured LLM to extract memories from a session transcript and merge
-    them into current_memory.
+    Extract memories from a session transcript and merge them into current_memory.
 
-    For large transcripts (> CHUNK_THRESHOLD chars), splits into chunks, extracts
-    notes from each chunk, then merges the combined notes into memory in a final pass.
+    When config.harvest_chunk_tokens > 0 (default 6000), uses a two-phase approach:
+      1. Split transcript into chunks, extract candidate facts from each via LLM.
+      2. Merge all candidates into current_memory in a single LLM call.
+    This keeps every LLM call under the token limit, avoiding rate-limit fallback
+    to local Ollama with oversized prompts.
 
-    Returns a dict with keys: updated_content (str), changed (bool), truncated (bool).
+    When harvest_chunk_tokens == 0, falls back to the original single-shot path
+    (full transcript in one call).
+
+    Returns a dict with keys: updated_content, changed, truncated, malformed,
+    input_tokens, output_tokens, backend, chunks_processed.
     Does NOT write files — caller handles I/O.
     """
-    if len(transcript) > CHUNK_THRESHOLD:
+    if config.harvest_chunk_tokens > 0:
         return _harvest_chunked(transcript, current_memory, config)
-    return _harvest_single(transcript, current_memory, config)
+    return _harvest_one_shot(transcript, current_memory, config)
 
 
-def _harvest_single(transcript: str, current_memory: str, config: Config) -> dict:
-    """Harvest from a transcript that fits in a single LLM call."""
+def _harvest_one_shot(transcript: str, current_memory: str, config: Config) -> dict:
+    """Original single-shot path: sends full transcript in one LLM call."""
     user_prompt = f"""\
 CURRENT GLOBAL MEMORY:
 {current_memory}
@@ -148,6 +122,8 @@ SESSION TRANSCRIPT:
             "malformed": True,
             "input_tokens": llm_result["input_tokens"],
             "output_tokens": llm_result["output_tokens"],
+            "backend": llm_result.get("backend", "unknown"),
+            "chunks_processed": 1,
         }
 
     updated_content = enforce_hard_constraints(current_memory, updated_content)
@@ -160,32 +136,108 @@ SESSION TRANSCRIPT:
         "malformed": False,
         "input_tokens": llm_result["input_tokens"],
         "output_tokens": llm_result["output_tokens"],
+        "backend": llm_result.get("backend", "unknown"),
+        "chunks_processed": 1,
+    }
+
+
+def extract_candidates_from_chunk(chunk: str, config: Config) -> dict:
+    """
+    Call LLM to extract memory-worthy facts from one transcript chunk.
+
+    Returns {"candidates": str, "input_tokens": int, "output_tokens": int}.
+    candidates is "" if the model found nothing worth persisting.
+    """
+    user_prompt = f"TRANSCRIPT SEGMENT:\n{chunk}"
+    llm_result = call_llm(EXTRACT_SYSTEM_PROMPT, user_prompt, "", config)
+    text = llm_result["text"].strip()
+    candidates = "" if not text or text.upper() == "NONE" else text
+    return {
+        "candidates": candidates,
+        "input_tokens": llm_result["input_tokens"],
+        "output_tokens": llm_result["output_tokens"],
+        "backend": llm_result.get("backend", "unknown"),
+    }
+
+
+def merge_candidates_into_memory(candidates: str, current_memory: str, config: Config) -> dict:
+    """
+    Merge a bullet list of extracted candidate facts into current_memory via LLM.
+    Returns the same dict shape as harvest_memory_content (without token counts,
+    which the caller accumulates across all extract calls).
+    """
+    user_prompt = f"""\
+CURRENT GLOBAL MEMORY:
+{current_memory}
+
+CANDIDATE FACTS:
+{candidates}"""
+
+    prefill = _build_prefill(current_memory)
+    llm_result = call_llm(MERGE_SYSTEM_PROMPT, user_prompt, prefill, config)
+    updated_content = _strip_model_wrapper(llm_result["text"])
+
+    if not _looks_like_memory_file(updated_content):
+        return {
+            "updated_content": updated_content,
+            "changed": False,
+            "truncated": False,
+            "malformed": True,
+            "input_tokens": llm_result["input_tokens"],
+            "output_tokens": llm_result["output_tokens"],
+            "backend": llm_result.get("backend", "unknown"),
+        }
+
+    updated_content = enforce_hard_constraints(current_memory, updated_content)
+    changed = updated_content != current_memory.strip()
+
+    return {
+        "updated_content": updated_content,
+        "changed": changed,
+        "truncated": llm_result["truncated"],
+        "malformed": False,
+        "input_tokens": llm_result["input_tokens"],
+        "output_tokens": llm_result["output_tokens"],
+        "backend": llm_result.get("backend", "unknown"),
     }
 
 
 def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> dict:
-    """
-    Harvest from a large transcript by splitting into chunks.
+    """Two-phase chunked harvest: extract candidates per chunk, then one merge call."""
+    from memsync.harvest import chunk_transcript
 
-    Phase 1: Extract notable facts from each chunk independently.
-    Phase 2: Merge all extracted notes into the memory file in one pass.
-    """
-    chunks = _chunk_transcript(transcript)
-    logger.info("Transcript too large (%d chars), splitting into %d chunks", len(transcript), len(chunks))
+    chunks = chunk_transcript(transcript, config.harvest_chunk_tokens)
+    n_chunks = len(chunks)
 
-    all_notes: list[str] = []
+    if not chunks:
+        return {
+            "updated_content": current_memory.strip(),
+            "changed": False,
+            "truncated": False,
+            "malformed": False,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "backend": "none",
+            "chunks_processed": 0,
+        }
+
     total_input = 0
     total_output = 0
+    candidate_blocks: list[str] = []
+    last_backend = "unknown"
 
     for i, chunk in enumerate(chunks):
-        logger.info("Extracting from chunk %d/%d (%d chars)", i + 1, len(chunks), len(chunk))
-        notes, inp, out = _extract_from_chunk(chunk, config)
-        total_input += inp
-        total_output += out
-        if notes:
-            all_notes.append(notes)
+        if i > 0 and config.chunk_inter_call_sleep > 0:
+            import time
+            time.sleep(config.chunk_inter_call_sleep)
+        result = extract_candidates_from_chunk(chunk, config)
+        total_input += result["input_tokens"]
+        total_output += result["output_tokens"]
+        last_backend = result.get("backend", last_backend)
+        if result["candidates"]:
+            candidate_blocks.append(result["candidates"])
 
-    if not all_notes:
+    if not candidate_blocks:
         return {
             "updated_content": current_memory.strip(),
             "changed": False,
@@ -193,79 +245,17 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
             "malformed": False,
             "input_tokens": total_input,
             "output_tokens": total_output,
+            "backend": last_backend,
+            "chunks_processed": n_chunks,
         }
 
-    # Phase 2: deduplicate and merge extracted notes into memory.
-    # Use a condensed version of memory for the merge LLM call to stay
-    # within context limits of smaller models (e.g. Ollama 8b).
-    combined_notes = "\n".join(all_notes)
-    condensed = _condense_memory(current_memory)
-    result = refresh_memory_content(combined_notes, condensed, config)
-    if result.get("malformed"):
-        # Merge failed — return notes as-is appended to current priorities
-        logger.warning("Chunked merge produced malformed output, appending notes directly")
-        appended = current_memory.rstrip() + "\n\n## Harvested notes (pending merge)\n" + combined_notes + "\n"
-        result = {
-            "updated_content": appended,
-            "changed": True,
-            "truncated": False,
-            "malformed": False,
-            "input_tokens": total_input,
-            "output_tokens": total_output,
-        }
-    else:
-        result["input_tokens"] = result.get("input_tokens", 0) + total_input
-        result["output_tokens"] = result.get("output_tokens", 0) + total_output
-    return result
-
-
-# Max chars to send as memory context in the chunked merge pass.
-_CONDENSED_MEMORY_LIMIT = 4000
-
-
-def _condense_memory(memory: str) -> str:
-    """
-    Produce a condensed version of the memory file for context-limited LLM calls.
-
-    Keeps all section headings and the first few items under each section,
-    plus full Hard constraints. Targets ~4K chars to leave room for notes.
-    """
-    lines = memory.splitlines()
-    condensed: list[str] = []
-    in_constraints = False
-    section_items = 0
-
-    for line in lines:
-        # Always keep headings
-        if re.match(r"^#{1,6}\s+", line):
-            in_constraints = bool(
-                re.match(r"^##\s+(Hard constraints|Constraints)\s*$", line, re.IGNORECASE)
-            )
-            section_items = 0
-            condensed.append(line)
-            continue
-
-        # Always keep hard constraints in full
-        if in_constraints:
-            condensed.append(line)
-            continue
-
-        # Keep first 5 items per section
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            section_items += 1
-            if section_items <= 5:
-                condensed.append(line)
-            elif section_items == 6:
-                condensed.append("- ... (additional items omitted for brevity)")
-        elif not stripped:
-            condensed.append(line)
-
-    result = "\n".join(condensed)
-    # Hard truncate if still too long
-    if len(result) > _CONDENSED_MEMORY_LIMIT:
-        result = result[:_CONDENSED_MEMORY_LIMIT] + "\n... (truncated)"
-    return result
+    combined_candidates = "\n".join(candidate_blocks)
+    merge_result = merge_candidates_into_memory(combined_candidates, current_memory, config)
+    merge_result["input_tokens"] += total_input
+    merge_result["output_tokens"] += total_output
+    merge_result["chunks_processed"] = n_chunks
+    # backend from merge call wins (most representative — if it fell back, this shows it)
+    return merge_result
 
 
 def _build_prefill(current_memory: str) -> str:
