@@ -209,13 +209,19 @@ def job_nightly_harvest(config: Config) -> None:
 
         for session_path in new_sessions:
             transcript, message_count = read_session_transcript(session_path)
-            harvested.add(session_path.stem)  # mark regardless of content
 
             if not transcript.strip():
+                harvested[session_path.stem] = message_count  # empty transcripts won't improve on retry
                 logger.debug("nightly_harvest: empty transcript in %s, skipping", session_path.stem)
                 continue
 
-            result = harvest_memory_content(transcript, current_memory, config)
+            try:
+                result = harvest_memory_content(transcript, current_memory, config)
+            except Exception:
+                logger.warning("nightly_harvest: all backends failed for %s — will retry next run", session_path.stem)
+                continue  # not marked — will retry on next run
+
+            harvested[session_path.stem] = message_count
 
             if result["truncated"]:
                 logger.warning(

@@ -348,9 +348,9 @@ def _harvest_all(
 
     for session_path in new_sessions:
         transcript, msg_count = read_session_transcript(session_path)
-        harvested[session_path.stem] = msg_count  # mark regardless of outcome
 
         if not transcript.strip():
+            harvested[session_path.stem] = msg_count  # empty transcripts won't improve on retry
             continue
 
         if not args.auto:
@@ -366,7 +366,9 @@ def _harvest_all(
         except LLMError as e:
             print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
             errors += 1
-            continue
+            continue  # not marked — will retry on next run
+
+        harvested[session_path.stem] = msg_count
 
         try:
             append_usage(
