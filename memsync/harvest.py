@@ -173,9 +173,9 @@ def chunk_transcript(transcript: str, max_tokens: int) -> list[str]:
     Uses a 4 chars/token heuristic — accurate enough for chunking boundaries
     without requiring a tokenizer dependency.
 
-    Splits only on turn boundaries (the separator between turns is never broken)
-    so each chunk contains only whole turns. A single turn that exceeds max_tokens
-    is kept as its own chunk — it cannot be split further without losing coherence.
+    Splits only on turn boundaries. Individual turns that exceed max_tokens are
+    truncated to max_chars with a marker suffix — the tail of a 93K-token tool
+    dump is noise for memory extraction purposes.
 
     Returns [] for empty/whitespace-only input, otherwise at least one element.
     """
@@ -191,6 +191,11 @@ def chunk_transcript(transcript: str, max_tokens: int) -> list[str]:
     current_chars = 0
 
     for turn in turns:
+        # Truncate turns that individually exceed the limit before any packing logic
+        if len(turn) > max_chars:
+            approx_tokens = len(turn) // 4
+            turn = turn[:max_chars] + f"\n[TURN TRUNCATED: was ~{approx_tokens} tokens, showing first {max_tokens}]"
+
         # Cost of appending this turn to the current chunk (separator + content)
         added_chars = (len(SEPARATOR) if current_turns else 0) + len(turn)
         if current_turns and current_chars + added_chars > max_chars:
