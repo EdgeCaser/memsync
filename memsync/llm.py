@@ -210,6 +210,14 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
 
 
 def _call_ollama(system: str, user: str, prefill: str, config: Config) -> dict:
+    estimated_tokens = (len(system) + len(user)) // 4
+    if estimated_tokens > config.ollama_num_ctx:
+        raise RuntimeError(
+            f"prompt too large for Ollama: ~{estimated_tokens} estimated tokens "
+            f"exceeds ollama_num_ctx={config.ollama_num_ctx} — skipping fallback "
+            f"to avoid truncated garbage output"
+        )
+
     try:
         import openai
     except ImportError as e:
