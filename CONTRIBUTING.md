@@ -18,6 +18,13 @@ Run tests:
 pytest tests/ -v
 ```
 
+The default install (`.[dev]`) runs the core test suite. Daemon tests require additional extras (`apscheduler`, `flask`). To run the full suite:
+
+```bash
+pip install -e ".[daemon,dev]"
+pytest tests/ -v
+```
+
 ---
 
 ## Adding a provider
