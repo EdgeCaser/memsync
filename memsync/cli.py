@@ -371,8 +371,6 @@ def _harvest_all(
             errors += 1
             continue  # not marked — will retry on next run
 
-        harvested[session_path.stem] = msg_count
-
         try:
             append_usage(
                 memory_root,
@@ -386,15 +384,18 @@ def _harvest_all(
         except OSError as e:
             logger.warning("Failed to write usage log: %s", e)
 
-        if result["truncated"]:
-            if not args.auto:
-                print("truncated — skipped.")
-            continue
-
         if result.get("malformed"):
             if not args.auto:
                 print("malformed response — skipped.")
             errors += 1
+            continue  # not marked — will retry on next run
+
+        harvested[session_path.stem] = msg_count
+        save_harvested_index(memory_root, harvested)
+
+        if result["truncated"]:
+            if not args.auto:
+                print("truncated — skipped.")
             continue
 
         if result["changed"]:
@@ -408,9 +409,6 @@ def _harvest_all(
         else:
             if not args.auto:
                 print("no changes.")
-
-    # Persist index and write memory once after all sessions processed
-    save_harvested_index(memory_root, harvested)
 
     if changed_any:
         backup_path = backup(global_memory, memory_root / "backups")
