@@ -404,25 +404,29 @@ class TestChunkTranscript:
         assert recombined == t
 
     def test_oversized_single_turn_becomes_its_own_chunk(self):
-        # A turn that alone exceeds max_chars must not be dropped.
+        # A turn that alone exceeds max_chars is truncated, not dropped.
         long_turn = "[USER]\n" + "x" * 1000
         short_turn = "[USER]\nshort"
         t = _make_transcript(long_turn, short_turn)
-        chunks = chunk_transcript(t, max_tokens=10)  # 40 chars — long_turn alone exceeds this
+        max_tokens = 10  # 40 chars — long_turn alone exceeds this
+        chunks = chunk_transcript(t, max_tokens=max_tokens)
         assert len(chunks) == 2
-        assert long_turn in chunks[0]
+        assert chunks[0].startswith(long_turn[: max_tokens * 4])
+        assert "[TURN TRUNCATED" in chunks[0]
         assert short_turn in chunks[1]
 
-    def test_single_turn_is_not_split(self):
+    def test_single_oversized_turn_is_truncated_not_dropped(self):
         t = "[USER]\nJust one turn"
-        chunks = chunk_transcript(t, max_tokens=1)  # tiny budget
+        chunks = chunk_transcript(t, max_tokens=1)  # 4 chars max
         assert len(chunks) == 1
-        assert chunks[0] == t
+        assert chunks[0].startswith(t[:4])
+        assert "[TURN TRUNCATED" in chunks[0]
 
     def test_no_content_lost_across_chunk_boundary(self):
         turns = ["[USER]\nA", "[ASSISTANT]\nB", "[USER]\nC", "[ASSISTANT]\nD"]
         t = _make_transcript(*turns)
-        chunks = chunk_transcript(t, max_tokens=3)  # ~12 chars, forces splits
+        # max_tokens=4 (16 chars) fits each turn (longest is 13 chars) but still forces splits
+        chunks = chunk_transcript(t, max_tokens=4)
         recombined = SEPARATOR.join(chunks)
         for turn in turns:
             assert turn in recombined

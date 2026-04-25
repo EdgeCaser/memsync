@@ -361,7 +361,7 @@ def _harvest_all(
 
         if not _first_call:
             import time
-            time.sleep(20)
+            time.sleep(config.chunk_inter_call_sleep)
         _first_call = False
 
         try:

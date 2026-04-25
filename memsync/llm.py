@@ -46,12 +46,9 @@ def call_llm(system: str, user: str, prefill: str, config: Config) -> dict:
 # Backend resolution
 # ---------------------------------------------------------------------------
 
-_BACKEND_FNS: dict[str, object] = {
-    "gemini": None,       # filled below after function definitions
-    "gemini_cli": None,
-    "ollama": None,
-    "anthropic": None,
-}
+_BACKEND_FNS: dict[str, object] = {}
+
+_adc_creds = None
 
 
 def _resolve_backends(config: Config) -> list[tuple[str, object]]:
@@ -62,11 +59,6 @@ def _resolve_backends(config: Config) -> list[tuple[str, object]]:
     If that fails, config.fallback_backend is tried next.
     Set fallback_backend = "none" to disable fallback and hard-error on primary failure.
     """
-    _BACKEND_FNS["gemini"] = _call_gemini
-    _BACKEND_FNS["gemini_cli"] = _call_gemini_cli
-    _BACKEND_FNS["ollama"] = _call_ollama
-    _BACKEND_FNS["anthropic"] = _call_anthropic
-
     primary = config.llm_backend
     fallback = config.fallback_backend
 
@@ -132,16 +124,7 @@ def _call_gemini(system: str, user: str, prefill: str, config: Config) -> dict:
         headers = {"Content-Type": "application/json"}
     else:
         # ADC path — Bearer token, no ?key= param
-        try:
-            import google.auth
-            import google.auth.transport.requests
-        except ImportError as e:
-            raise ImportError("google-auth required for ADC: pip install google-auth") from e
-
-        creds, _ = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/generative-language"]
-        )
-        creds.refresh(google.auth.transport.requests.Request())
+        creds = _get_adc_creds()
         url = url_base
         headers = {
             "Content-Type": "application/json",
@@ -279,3 +262,28 @@ def _call_anthropic(system: str, user: str, prefill: str, config: Config) -> dic
         "output_tokens": response.usage.output_tokens,
         "truncated": response.stop_reason == "max_tokens",
     }
+
+
+def _get_adc_creds():
+    global _adc_creds
+    try:
+        import google.auth
+        import google.auth.transport.requests
+    except ImportError as e:
+        raise ImportError("google-auth required for ADC: pip install google-auth") from e
+
+    if _adc_creds is None:
+        _adc_creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/generative-language"]
+        )
+
+    if not _adc_creds.valid:
+        _adc_creds.refresh(google.auth.transport.requests.Request())
+
+    return _adc_creds
+
+
+_BACKEND_FNS["gemini"] = _call_gemini
+_BACKEND_FNS["gemini_cli"] = _call_gemini_cli
+_BACKEND_FNS["ollama"] = _call_ollama
+_BACKEND_FNS["anthropic"] = _call_anthropic
