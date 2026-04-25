@@ -843,7 +843,10 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
                     )
                     checks.append(("LLM / API key", True, detail))
                 else:
-                    detail = f"gemini — no API key, ADC failed, no fallback configured: {_adc_err}"
+                    detail = (
+                        "gemini — no API key, ADC failed,"
+                        f" no fallback configured: {_adc_err}"
+                    )
                     checks.append(("LLM / API key", False, detail))
     elif backend == "gemini_cli":
         import shutil
