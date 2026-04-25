@@ -194,7 +194,10 @@ def chunk_transcript(transcript: str, max_tokens: int) -> list[str]:
         # Truncate turns that individually exceed the limit before any packing logic
         if len(turn) > max_chars:
             approx_tokens = len(turn) // 4
-            marker = f"\n[TURN TRUNCATED: was ~{approx_tokens} tokens, showing first ~{max_tokens} tokens]"
+            marker = (
+                f"\n[TURN TRUNCATED: was ~{approx_tokens} tokens,"
+                f" showing first ~{max_tokens} tokens]"
+            )
             turn = turn[:max_chars] + marker
 
         # Cost of appending this turn to the current chunk (separator + content)
