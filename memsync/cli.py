@@ -330,8 +330,14 @@ def _harvest_all(
     for project_dir in sorted(projects_dir.iterdir()):
         if project_dir.is_dir():
             for session_path in list_sessions(project_dir):
-                if session_path.stem not in harvested:
+                stored = harvested.get(session_path.stem)
+                if stored is None:
                     new_sessions.append(session_path)
+                elif stored >= 0:
+                    # Re-harvest if the session has grown since last harvest
+                    _, current_count = read_session_transcript(session_path)
+                    if current_count > stored:
+                        new_sessions.append(session_path)
 
     if not new_sessions:
         if not args.auto:
