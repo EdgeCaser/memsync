@@ -368,7 +368,7 @@ class TestHarvestMemoryContent:
 # chunk_transcript
 # ---------------------------------------------------------------------------
 
-SEPARATOR = "\n\n---\n\n"
+from memsync.harvest import _TURN_SEPARATOR as SEPARATOR
 
 
 def _make_transcript(*turns: str) -> str:
