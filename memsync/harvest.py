@@ -6,6 +6,11 @@ from pathlib import Path
 
 CLAUDE_PROJECTS_DIR = Path("~/.claude/projects").expanduser()
 
+# Separator used between turns in the in-memory transcript string.
+# Uses a Unicode Private Use Area character so it cannot appear naturally in
+# any message content (including markdown horizontal rules like "---").
+_TURN_SEPARATOR = "\n\n\ue001\n\n"
+
 
 # ---------------------------------------------------------------------------
 # Project directory resolution
@@ -122,7 +127,7 @@ def read_session_transcript(path: Path) -> tuple[str, int]:
                 if parts:
                     turns.append(f"[{role.upper()}]\n" + "\n".join(parts))
 
-    return "\n\n---\n\n".join(turns), len(turns)
+    return _TURN_SEPARATOR.join(turns), len(turns)
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +187,7 @@ def chunk_transcript(transcript: str, max_tokens: int) -> list[str]:
     if not transcript.strip():
         return []
 
-    SEPARATOR = "\n\n---\n\n"
+    SEPARATOR = _TURN_SEPARATOR
     max_chars = max_tokens * 4
     turns = transcript.split(SEPARATOR)
 

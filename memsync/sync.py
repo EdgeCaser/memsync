@@ -145,7 +145,7 @@ def extract_candidates_from_chunk(chunk: str, config: Config) -> dict:
     """
     Call LLM to extract memory-worthy facts from one transcript chunk.
 
-    Returns {"candidates": str, "input_tokens": int, "output_tokens": int}.
+    Returns {"candidates": str, "truncated": bool, "input_tokens": int, "output_tokens": int}.
     candidates is "" if the model found nothing worth persisting.
     """
     user_prompt = f"TRANSCRIPT SEGMENT:\n{chunk}"
@@ -154,6 +154,7 @@ def extract_candidates_from_chunk(chunk: str, config: Config) -> dict:
     candidates = "" if not text or text.upper() == "NONE" else text
     return {
         "candidates": candidates,
+        "truncated": llm_result["truncated"],
         "input_tokens": llm_result["input_tokens"],
         "output_tokens": llm_result["output_tokens"],
         "backend": llm_result.get("backend", "unknown"),
@@ -223,6 +224,7 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
 
     total_input = 0
     total_output = 0
+    any_truncated = False
     candidate_blocks: list[str] = []
     last_backend = "unknown"
 
@@ -233,6 +235,7 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
         result = extract_candidates_from_chunk(chunk, config)
         total_input += result["input_tokens"]
         total_output += result["output_tokens"]
+        any_truncated = any_truncated or result["truncated"]
         last_backend = result.get("backend", last_backend)
         if result["candidates"]:
             candidate_blocks.append(result["candidates"])
@@ -241,7 +244,7 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
         return {
             "updated_content": current_memory.strip(),
             "changed": False,
-            "truncated": False,
+            "truncated": any_truncated,
             "malformed": False,
             "input_tokens": total_input,
             "output_tokens": total_output,
@@ -254,6 +257,8 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
     merge_result["input_tokens"] += total_input
     merge_result["output_tokens"] += total_output
     merge_result["chunks_processed"] = n_chunks
+    # OR with extract-phase truncation — if any chunk was cut short, surface it
+    merge_result["truncated"] = merge_result["truncated"] or any_truncated
     # backend from merge call wins (most representative — if it fell back, this shows it)
     return merge_result
 
