@@ -1082,6 +1082,7 @@ _DAEMON_INSTALL_HINT = (
 )
 
 _PID_FILE = Path("~/.config/memsync/daemon.pid").expanduser()
+_LOG_FILE = Path("~/.config/memsync/daemon.log").expanduser()
 
 
 def _daemon_import_guard() -> bool:
@@ -1103,8 +1104,10 @@ def cmd_daemon_start(args: argparse.Namespace, config: Config) -> int:
     if args.detach:
         import subprocess
 
+        _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(_LOG_FILE, "a", encoding="utf-8")  # noqa: SIM115
         script = [sys.executable, "-m", "memsync.cli", "daemon", "start"]
-        kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        kwargs: dict = {"stdout": log_fh, "stderr": log_fh}
         if platform.system() == "Windows":
             _flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
             kwargs["creationflags"] = _flags
@@ -1115,11 +1118,23 @@ def cmd_daemon_start(args: argparse.Namespace, config: Config) -> int:
         _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         _PID_FILE.write_text(str(proc.pid), encoding="utf-8")
         print(f"Daemon started (PID {proc.pid}).")
+        print(f"Logs:       {_LOG_FILE}")
         print("Stop with: memsync daemon stop")
         return 0
 
-    # Foreground mode — run everything in threads, block until interrupted
+    # Foreground mode — configure logging then run everything in threads
+    import logging as _logging
     import threading
+
+    _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            _logging.FileHandler(_LOG_FILE, encoding="utf-8"),
+            _logging.StreamHandler(),
+        ],
+    )
 
     from memsync.daemon.scheduler import build_scheduler
 
@@ -1222,12 +1237,27 @@ def cmd_daemon_status(args: argparse.Namespace, config: Config) -> int:
     else:
         print("Daemon is not running.")
 
+    log_status = str(_LOG_FILE) if _LOG_FILE.exists() else f"{_LOG_FILE} (not yet created)"
+    print(f"Log:      {log_status}")
     print(f"\nWeb UI:   {'enabled' if config.daemon.web_ui_enabled else 'disabled'}"
           f"  (port {config.daemon.web_ui_port})")
     print(f"Capture:  {'enabled' if config.daemon.capture_enabled else 'disabled'}"
           f"  (port {config.daemon.capture_port})")
     print(f"Refresh:  {'enabled' if config.daemon.refresh_enabled else 'disabled'}"
           f"  (schedule: {config.daemon.refresh_schedule})")
+    return 0
+
+
+def cmd_daemon_logs(args: argparse.Namespace, config: Config) -> int:  # noqa: ARG001
+    """Show recent daemon log entries."""
+    if not _LOG_FILE.exists():
+        print(f"No log file found at {_LOG_FILE}.")
+        print("Start the daemon with: memsync daemon start --detach")
+        return 1
+    lines = _LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    n = args.lines
+    for line in lines[-n:]:
+        print(line)
     return 0
 
 
@@ -1434,6 +1464,12 @@ def build_parser() -> argparse.ArgumentParser:
         "schedule", help="Show scheduled jobs and next run times"
     )
     p_daemon_schedule.set_defaults(func=cmd_daemon_schedule)
+
+    p_daemon_logs = daemon_sub.add_parser("logs", help="Show recent daemon log entries")
+    p_daemon_logs.add_argument(
+        "-n", "--lines", type=int, default=50, help="Number of lines to show (default: 50)"
+    )
+    p_daemon_logs.set_defaults(func=cmd_daemon_logs)
 
     p_daemon_install = daemon_sub.add_parser(
         "install", help="Register as a system service (auto-starts on boot)"

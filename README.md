@@ -1,10 +1,16 @@
 # memsync
 
+[![GitHub stars](https://img.shields.io/github/stars/ianmiell/memsync?style=social)](https://github.com/ianmiell/memsync/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/ianmiell/memsync?style=social)](https://github.com/ianmiell/memsync/network/members)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Cross-platform global memory manager for Claude Code.
 
 Claude Code has no memory between sessions. memsync fixes that: it maintains one canonical `GLOBAL_MEMORY.md` in your cloud sync folder, linked to `~/.claude/CLAUDE.md` so Claude Code reads it at every session start.
 
 You can update memory manually with a single command, or install the daemon and let it run in the background — harvesting your session transcripts every night and keeping your memory current without any intervention.
+
+These memory management principles apply broadly, so memsync's core functionality should work across various AI coding agents.
 
 ---
 
@@ -23,9 +29,14 @@ OneDrive/.claude-memory/
 
 ~/.claude/projects/<key>/   ← Claude Code session transcripts (machine-local)
   <uuid>.jsonl
+
+docs/examples/              ← example CLAUDE.md files for different product types
+  CLAUDE.md.b2b_saas
+  CLAUDE.md.consumer_app
+  CLAUDE.md.api_platform
 ```
 
-Every Claude Code session starts by reading `~/.claude/CLAUDE.md`. memsync keeps it current.
+Every Claude Code session starts by reading `~/.claude/CLAUDE.md`. memsync keeps it current. See `docs/examples/` for example `CLAUDE.md` files tailored to different product types.
 
 Memory is updated two ways:
 - **`memsync harvest`** — reads Claude Code's session transcript directly and extracts what's worth remembering. No notes required from you.
