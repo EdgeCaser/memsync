@@ -203,22 +203,22 @@ def _ollama_health_url(base_url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}/"
 
 
-def _check_ollama_reachable(base_url: str, timeout: float = 3.0) -> None:
-    """Ensure Ollama is reachable, starting it automatically if not."""
+def _check_ollama_reachable(config: Config, timeout: float = 3.0) -> None:
+    """Ensure Ollama is reachable, starting and warming up the model if not."""
     import urllib.request
 
-    health_url = _ollama_health_url(base_url)
+    health_url = _ollama_health_url(config.ollama_base_url)
     try:
         urllib.request.urlopen(health_url, timeout=timeout)  # noqa: S310
         return  # already running
     except Exception:
         pass
 
-    _start_ollama_service(base_url)
+    _start_ollama_service(config)
 
 
-def _start_ollama_service(base_url: str) -> None:
-    """Start `ollama serve` as a detached background process, then wait up to 20s for it."""
+def _start_ollama_service(config: Config) -> None:
+    """Start `ollama serve` as a detached background process, wait for it, then warm up the model."""
     import shutil
     import time
     import urllib.request
@@ -244,12 +244,13 @@ def _start_ollama_service(base_url: str) -> None:
     except Exception as e:
         raise RuntimeError(f"Failed to start Ollama: {e}") from e
 
-    health_url = _ollama_health_url(base_url)
+    health_url = _ollama_health_url(config.ollama_base_url)
     for _ in range(10):
         time.sleep(2)
         try:
             urllib.request.urlopen(health_url, timeout=2)  # noqa: S310
-            logger.info("Ollama started successfully")
+            logger.info("Ollama started — warming up model %s", config.ollama_model)
+            _warmup_ollama_model(config)
             return
         except Exception:
             pass
@@ -257,6 +258,35 @@ def _start_ollama_service(base_url: str) -> None:
     raise RuntimeError(
         f"Ollama was started but did not become reachable at {health_url} within 20s"
     )
+
+
+# Warm-up timeout is intentionally long: first load pulls the model into RAM,
+# which can take several minutes on a Raspberry Pi.
+_OLLAMA_WARMUP_TIMEOUT = 300
+
+
+def _warmup_ollama_model(config: Config) -> None:
+    """Send a minimal 1-token prompt to force the model to load before harvest calls arrive."""
+    try:
+        import openai
+    except ImportError:
+        return  # openai not installed — skip warmup, real call will handle the import error
+
+    client = openai.OpenAI(
+        api_key="ollama",
+        base_url=config.ollama_base_url,
+        timeout=_OLLAMA_WARMUP_TIMEOUT,
+    )
+    try:
+        client.chat.completions.create(
+            model=config.ollama_model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body={"options": {"num_ctx": config.ollama_num_ctx}},
+        )
+        logger.info("Ollama model %s is ready", config.ollama_model)
+    except Exception as e:
+        logger.warning("Ollama warm-up failed (model may still load on first use): %s", e)
 
 
 _CANDIDATE_FACTS_MARKER = "\n\nCANDIDATE FACTS:\n"
@@ -296,7 +326,7 @@ def _truncate_user_for_ollama(user: str, system: str, num_ctx: int) -> str | Non
 
 
 def _call_ollama(system: str, user: str, prefill: str, config: Config) -> dict:
-    _check_ollama_reachable(config.ollama_base_url)
+    _check_ollama_reachable(config)
 
     estimated_tokens = (len(system) + len(user)) // 4
     if estimated_tokens > config.ollama_num_ctx:
