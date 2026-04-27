@@ -183,8 +183,8 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
         stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
         if "ERR_STREAM_PREMATURE_CLOSE" in stderr_text or "Premature close" in stderr_text:
             raise RuntimeError(
-                f"gemini CLI quota/rate-limit (ERR_STREAM_PREMATURE_CLOSE) — "
-                f"daily token quota likely exhausted; will retry next run"
+                "gemini CLI quota/rate-limit (ERR_STREAM_PREMATURE_CLOSE) — "
+                "daily token quota likely exhausted; will retry next run"
             )
         raise RuntimeError(
             f"gemini CLI failed (exit {result.returncode}): {stderr_text}"
@@ -211,14 +211,14 @@ def _check_ollama_reachable(config: Config, timeout: float = 3.0) -> None:
     try:
         urllib.request.urlopen(health_url, timeout=timeout)  # noqa: S310
         return  # already running
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
     _start_ollama_service(config)
 
 
 def _start_ollama_service(config: Config) -> None:
-    """Start `ollama serve` as a detached background process, wait for it, then warm up the model."""
+    """Start `ollama serve` as a detached background process, wait for it, then warm up."""
     import shutil
     import time
     import urllib.request
@@ -252,7 +252,7 @@ def _start_ollama_service(config: Config) -> None:
             logger.info("Ollama started — warming up model %s", config.ollama_model)
             _warmup_ollama_model(config)
             return
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     raise RuntimeError(
