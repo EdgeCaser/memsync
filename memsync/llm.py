@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+from urllib.parse import urlparse
 
 from memsync.config import Config
 
@@ -179,9 +180,14 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
         ) from e
 
     if result.returncode != 0:
+        stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
+        if "ERR_STREAM_PREMATURE_CLOSE" in stderr_text or "Premature close" in stderr_text:
+            raise RuntimeError(
+                f"gemini CLI quota/rate-limit (ERR_STREAM_PREMATURE_CLOSE) — "
+                f"daily token quota likely exhausted; will retry next run"
+            )
         raise RuntimeError(
-            f"gemini CLI failed (exit {result.returncode}): "
-            f"{result.stderr.decode('utf-8', errors='replace').strip()}"
+            f"gemini CLI failed (exit {result.returncode}): {stderr_text}"
         )
 
     return {
@@ -192,14 +198,120 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
     }
 
 
+def _ollama_health_url(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+def _check_ollama_reachable(base_url: str, timeout: float = 3.0) -> None:
+    """Ensure Ollama is reachable, starting it automatically if not."""
+    import urllib.request
+
+    health_url = _ollama_health_url(base_url)
+    try:
+        urllib.request.urlopen(health_url, timeout=timeout)  # noqa: S310
+        return  # already running
+    except Exception:
+        pass
+
+    _start_ollama_service(base_url)
+
+
+def _start_ollama_service(base_url: str) -> None:
+    """Start `ollama serve` as a detached background process, then wait up to 20s for it."""
+    import shutil
+    import time
+    import urllib.request
+
+    if shutil.which("ollama") is None:
+        raise RuntimeError(
+            "Ollama is not reachable and 'ollama' binary not found — "
+            "install from https://ollama.com"
+        )
+
+    logger.info("Ollama not running — starting 'ollama serve' in the background")
+
+    kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(["ollama", "serve"], **kwargs)  # noqa: S603
+    except Exception as e:
+        raise RuntimeError(f"Failed to start Ollama: {e}") from e
+
+    health_url = _ollama_health_url(base_url)
+    for _ in range(10):
+        time.sleep(2)
+        try:
+            urllib.request.urlopen(health_url, timeout=2)  # noqa: S310
+            logger.info("Ollama started successfully")
+            return
+        except Exception:
+            pass
+
+    raise RuntimeError(
+        f"Ollama was started but did not become reachable at {health_url} within 20s"
+    )
+
+
+_CANDIDATE_FACTS_MARKER = "\n\nCANDIDATE FACTS:\n"
+
+
+def _truncate_user_for_ollama(user: str, system: str, num_ctx: int) -> str | None:
+    """
+    Attempt to truncate user to fit within num_ctx tokens alongside system.
+
+    For merge-call prompts (containing CANDIDATE FACTS section), truncates the
+    memory section and preserves the candidates. Returns None if even candidates
+    alone won't fit.
+    """
+    # 200-token safety margin; *4 converts token budget to char budget
+    max_user_chars = (num_ctx - len(system) // 4 - 200) * 4
+    if max_user_chars < 200 * 4:
+        return None
+
+    if len(user) <= max_user_chars:
+        return user
+
+    idx = user.find(_CANDIDATE_FACTS_MARKER)
+    if idx == -1:
+        # No semantic structure — truncate from end
+        return user[:max_user_chars] + "\n[PROMPT TRUNCATED TO FIT CONTEXT WINDOW]"
+
+    candidates_section = user[idx:]
+    if len(candidates_section) >= max_user_chars:
+        return None  # candidates alone won't fit
+
+    memory_budget = max_user_chars - len(candidates_section) - 60
+    return (
+        user[:memory_budget]
+        + "\n[MEMORY TRUNCATED TO FIT OLLAMA CONTEXT WINDOW]\n"
+        + candidates_section
+    )
+
+
 def _call_ollama(system: str, user: str, prefill: str, config: Config) -> dict:
+    _check_ollama_reachable(config.ollama_base_url)
+
     estimated_tokens = (len(system) + len(user)) // 4
     if estimated_tokens > config.ollama_num_ctx:
-        raise RuntimeError(
-            f"prompt too large for Ollama: ~{estimated_tokens} estimated tokens "
-            f"exceeds ollama_num_ctx={config.ollama_num_ctx} — skipping fallback "
-            f"to avoid truncated garbage output"
+        truncated_user = _truncate_user_for_ollama(user, system, config.ollama_num_ctx)
+        if truncated_user is None:
+            raise RuntimeError(
+                f"prompt too large for Ollama: ~{estimated_tokens} estimated tokens "
+                f"exceeds ollama_num_ctx={config.ollama_num_ctx} — cannot truncate safely"
+            )
+        logger.warning(
+            "Ollama prompt (~%d tokens) exceeds context window (%d); truncating memory section",
+            estimated_tokens,
+            config.ollama_num_ctx,
         )
+        user = truncated_user
 
     try:
         import openai
