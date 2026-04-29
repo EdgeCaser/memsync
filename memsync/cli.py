@@ -909,6 +909,39 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
     else:
         checks.append(("Memory directory", False, "cannot resolve — fix provider first"))
 
+    # 7. Daemon health (optional but warn if stale)
+    if _PID_FILE.exists():
+        try:
+            pid = int(_PID_FILE.read_text(encoding="utf-8").strip())
+            if platform.system() == "Windows":
+                import subprocess as _sp
+                _r = _sp.run(
+                    ["tasklist", "/FI", f"PID eq {pid}"],
+                    capture_output=True, text=True,
+                )
+                daemon_alive = str(pid) in _r.stdout
+            else:
+                import os as _os
+                try:
+                    _os.kill(pid, 0)
+                    daemon_alive = True
+                except (ProcessLookupError, OSError):
+                    daemon_alive = False
+            if daemon_alive:
+                checks.append(("Daemon", True, f"running (PID {pid})"))
+            else:
+                checks.append((
+                    "Daemon", False,
+                    f"not running — stale PID {pid}. Run: memsync daemon start --detach",
+                ))
+        except ValueError:
+            checks.append(("Daemon", False, f"corrupt PID file: {_PID_FILE}"))
+    else:
+        checks.append((
+            "Daemon", True,
+            "not started (optional — run: memsync daemon start --detach)",
+        ))
+
     # Print results
     all_ok = all(ok for _, ok, _ in checks)
     print("memsync doctor\n")

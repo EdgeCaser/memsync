@@ -2,9 +2,9 @@
 System service installation for the memsync daemon.
 
 Supports:
-  Linux  — systemd unit file at /etc/systemd/system/memsync.service
-  Mac    — launchd plist at ~/Library/LaunchAgents/com.memsync.daemon.plist
-  Windows — not supported (use Task Scheduler with 'memsync daemon start --detach')
+  Linux   — systemd unit file at /etc/systemd/system/memsync.service
+  Mac     — launchd plist at ~/Library/LaunchAgents/com.memsync.daemon.plist
+  Windows — Task Scheduler ONLOGON task via schtasks
 
 IMPORTANT: systemd install requires root (sudo memsync daemon install).
 The unit file contains a placeholder for ANTHROPIC_API_KEY. After install,
@@ -60,6 +60,9 @@ LAUNCHD_PLIST = """\
 """
 
 
+_WINDOWS_TASK_NAME = "memsync daemon"
+
+
 def install_service() -> None:
     """Install the memsync daemon as a system service."""
     system = platform.system()
@@ -69,11 +72,10 @@ def install_service() -> None:
         _install_systemd(memsync_bin)
     elif system == "Darwin":
         _install_launchd(memsync_bin)
+    elif system == "Windows":
+        _install_taskscheduler(memsync_bin)
     else:
-        raise NotImplementedError(
-            "Service install is not supported on Windows.\n"
-            "Use Task Scheduler to run 'memsync daemon start --detach' on boot."
-        )
+        raise NotImplementedError(f"Service install not supported on {system}.")
 
 
 def uninstall_service() -> None:
@@ -83,8 +85,10 @@ def uninstall_service() -> None:
         _uninstall_systemd()
     elif system == "Darwin":
         _uninstall_launchd()
+    elif system == "Windows":
+        _uninstall_taskscheduler()
     else:
-        raise NotImplementedError("Service uninstall not supported on Windows.")
+        raise NotImplementedError(f"Service uninstall not supported on {system}.")
 
 
 def _install_systemd(memsync_bin: str) -> None:
@@ -128,6 +132,42 @@ def _uninstall_launchd() -> None:
         subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
         plist_path.unlink()
     print("Service removed.")
+
+
+_WINDOWS_RUN_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+_WINDOWS_RUN_VALUE = "memsync-daemon"
+
+
+def _install_taskscheduler(memsync_bin: str) -> None:
+    import winreg
+    log_file = Path.home() / ".config" / "memsync" / "daemon.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    startup_cmd = f'"{memsync_bin}" daemon start --detach'
+    key = winreg.OpenKey(  # noqa: S609
+        winreg.HKEY_CURRENT_USER, _WINDOWS_RUN_KEY, 0, winreg.KEY_SET_VALUE
+    )
+    try:
+        winreg.SetValueEx(key, _WINDOWS_RUN_VALUE, 0, winreg.REG_SZ, startup_cmd)
+    finally:
+        winreg.CloseKey(key)
+    print(f"Registry startup entry added: HKCU\\...\\Run\\{_WINDOWS_RUN_VALUE}")
+    print("Daemon will auto-start on every login.")
+    print(f"Logs: {log_file}")
+
+
+def _uninstall_taskscheduler() -> None:
+    import winreg
+    try:
+        key = winreg.OpenKey(  # noqa: S609
+            winreg.HKEY_CURRENT_USER, _WINDOWS_RUN_KEY, 0, winreg.KEY_SET_VALUE
+        )
+        try:
+            winreg.DeleteValue(key, _WINDOWS_RUN_VALUE)
+        finally:
+            winreg.CloseKey(key)
+        print(f"Registry startup entry removed: HKCU\\...\\Run\\{_WINDOWS_RUN_VALUE}")
+    except FileNotFoundError:
+        print("No registry startup entry found — nothing to remove.")
 
 
 def _find_memsync_bin() -> str:
