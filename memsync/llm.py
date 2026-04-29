@@ -211,7 +211,7 @@ def _check_ollama_reachable(config: Config, timeout: float = 3.0) -> None:
     try:
         urllib.request.urlopen(health_url, timeout=timeout)  # noqa: S310
         return  # already running
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass
 
     _start_ollama_service(config)
@@ -252,7 +252,7 @@ def _start_ollama_service(config: Config) -> None:
             logger.info("Ollama started — warming up model %s", config.ollama_model)
             _warmup_ollama_model(config)
             return
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
 
     raise RuntimeError(
