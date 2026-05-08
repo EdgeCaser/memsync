@@ -265,6 +265,13 @@ class TestReadSessionTranscript:
         transcript, count = read_session_transcript(path)
         assert "good line" in transcript
 
+    def test_skips_blank_lines_between_entries(self, tmp_path):
+        entry = json.dumps({"type": "user", "message": {"role": "user", "content": "hello"}})
+        path = tmp_path / "session.jsonl"
+        path.write_text(f"{entry}\n\n{entry}\n", encoding="utf-8")
+        transcript, count = read_session_transcript(path)
+        assert count == 2
+
 
 # ---------------------------------------------------------------------------
 # Harvest index
@@ -306,6 +313,11 @@ class TestHarvestIndex:
         )
         result = load_harvested_index(tmp_path)
         assert result == {"good": 5}
+
+    def test_returns_empty_dict_when_data_is_unexpected_json_type(self, tmp_path):
+        (tmp_path / "harvested.json").write_text("null", encoding="utf-8")
+        result = load_harvested_index(tmp_path)
+        assert result == {}
 
 
 # ---------------------------------------------------------------------------

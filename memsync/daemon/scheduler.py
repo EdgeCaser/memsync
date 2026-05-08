@@ -101,7 +101,7 @@ def job_nightly_refresh(config: Config) -> None:
     from memsync.backups import backup
     from memsync.claude_md import sync as sync_claude_md
     from memsync.providers import get_provider
-    from memsync.sync import refresh_memory_content
+    from memsync.sync import load_or_init_archive, refresh_memory_content
 
     try:
         provider = get_provider(config.provider)
@@ -128,13 +128,17 @@ def job_nightly_refresh(config: Config) -> None:
             logger.warning("nightly_refresh: GLOBAL_MEMORY.md not found, skipping")
             return
 
+        archive_path = memory_root / "MEMORY_ARCHIVE.md"
         current_memory = memory_path.read_text(encoding="utf-8")
-        result = refresh_memory_content(notes, current_memory, config)
+        current_cold = load_or_init_archive(archive_path)
+        result = refresh_memory_content(notes, current_memory, config, current_cold)
 
         if result["changed"]:
             backup(memory_path, memory_root / "backups")
             memory_path.write_text(result["updated_content"], encoding="utf-8")
             sync_claude_md(memory_path, config.claude_md_target)
+            if result.get("changed_cold") and result.get("updated_cold"):
+                archive_path.write_text(result["updated_cold"], encoding="utf-8")
             logger.info("nightly_refresh: memory updated for %s", today)
         else:
             logger.info("nightly_refresh: no changes for %s", today)
@@ -147,7 +151,7 @@ def job_nightly_refresh(config: Config) -> None:
             input_data={"session_log": str(session_log), "source": "scheduler"},
             memory_before=current_memory,
             memory_after=result.get("updated_content", current_memory),
-            llm_metadata={k: v for k, v in result.items() if k != "updated_content"},
+            llm_metadata={k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")},
             journal_dir=str(memory_root / "journal"),
         )
 
@@ -173,7 +177,7 @@ def job_nightly_harvest(config: Config) -> None:
         save_harvested_index,
     )
     from memsync.providers import get_provider
-    from memsync.sync import harvest_memory_content, load_or_init_memory
+    from memsync.sync import harvest_memory_content, load_or_init_archive, load_or_init_memory
 
     try:
         provider = get_provider(config.provider)
@@ -216,8 +220,11 @@ def job_nightly_harvest(config: Config) -> None:
         logger.info("nightly_harvest: processing %d new session(s)", len(new_sessions))
 
         # Process sessions sequentially — each one builds on the updated memory
+        archive_path = memory_root / "MEMORY_ARCHIVE.md"
         current_memory = load_or_init_memory(memory_path)
+        current_cold = load_or_init_archive(archive_path)
         changed_any = False
+        changed_cold_any = False
 
         for session_path in new_sessions:
             transcript, message_count = read_session_transcript(session_path)
@@ -228,7 +235,7 @@ def job_nightly_harvest(config: Config) -> None:
                 continue
 
             try:
-                result = harvest_memory_content(transcript, current_memory, config)
+                result = harvest_memory_content(transcript, current_memory, config, current_cold)
             except Exception:
                 logger.warning(
                     "nightly_harvest: all backends failed for %s — will retry next run",
@@ -248,6 +255,9 @@ def job_nightly_harvest(config: Config) -> None:
             if result["changed"]:
                 current_memory = result["updated_content"]
                 changed_any = True
+                if result.get("changed_cold") and result.get("updated_cold"):
+                    current_cold = result["updated_cold"]
+                    changed_cold_any = True
                 backend = result.get("backend", "unknown")
                 chunks = result.get("chunks_processed", 1)
                 tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
@@ -263,6 +273,8 @@ def job_nightly_harvest(config: Config) -> None:
             backup(memory_path, memory_root / "backups")
             memory_path.write_text(current_memory, encoding="utf-8")
             sync_claude_md(memory_path, config.claude_md_target)
+            if changed_cold_any:
+                archive_path.write_text(current_cold, encoding="utf-8")
             logger.info("nightly_harvest: memory updated from %d session(s)", len(new_sessions))
         else:
             logger.info("nightly_harvest: no changes from %d session(s)", len(new_sessions))
