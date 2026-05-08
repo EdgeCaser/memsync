@@ -77,6 +77,11 @@ class Config:
     harvest_chunk_tokens: int = 6000         # split transcripts into chunks this size; 0 = one-shot
     chunk_inter_call_sleep: int = 5          # seconds between chunk extract calls; avoids RPM 429s
 
+    # [archive] — tiered memory
+    max_hot_lines: int = 100                 # hard cap on GLOBAL_MEMORY.md (hot layer)
+    archive_in_harvest: bool = True          # whether harvest/refresh consults MEMORY_ARCHIVE.md
+    archive_max_lines_in_prompt: int = 300   # truncation limit for archive in LLM call
+
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
     claude_md_target: Path = None           # set in __post_init__
@@ -160,6 +165,9 @@ class Config:
             ollama_num_ctx=llm_raw.get("ollama_num_ctx", 8192),
             harvest_chunk_tokens=llm_raw.get("harvest_chunk_tokens", 6000),
             chunk_inter_call_sleep=llm_raw.get("chunk_inter_call_sleep", 5),
+            max_hot_lines=core.get("max_hot_lines", 100),
+            archive_in_harvest=core.get("archive_in_harvest", True),
+            archive_max_lines_in_prompt=core.get("archive_max_lines_in_prompt", 300),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -190,6 +198,9 @@ class Config:
             f'model = "{self.model}"',
             f"max_memory_lines = {self.max_memory_lines}",
             f"max_tokens = {self.max_tokens}",
+            f"max_hot_lines = {self.max_hot_lines}",
+            f"archive_in_harvest = {str(self.archive_in_harvest).lower()}",
+            f"archive_max_lines_in_prompt = {self.archive_max_lines_in_prompt}",
         ]
         if self.api_key:
             lines.append(f'api_key = "{self.api_key}"')
