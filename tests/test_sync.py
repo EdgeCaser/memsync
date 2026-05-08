@@ -365,3 +365,47 @@ class TestDeduplicateMemory:
         text = "## Section\nSome prose.\nSome prose.\n- bullet\n"
         result = _deduplicate_memory(text)
         assert result.count("Some prose.") == 2
+
+
+class TestStripLabelPrefix:
+    def test_returns_text_unchanged_when_no_markdown_found(self):
+        from memsync.sync import _strip_label_prefix
+        text = "HOT MEMORY: foo\nsome plain text"
+        assert _strip_label_prefix(text) == text
+
+
+class TestHarvestOneShotPaths:
+    @staticmethod
+    def _llm_result(text: str) -> dict:
+        return {"text": text, "input_tokens": 5, "output_tokens": 5, "truncated": False}
+
+    def test_archive_section_included_when_cold_provided(self):
+        config = Config(harvest_chunk_tokens=0)
+        captured: list[str] = []
+
+        def capture(system, user, prefill, cfg):
+            captured.append(user)
+            return self._llm_result(SAMPLE_MEMORY)
+
+        with patch("memsync.sync.call_llm", side_effect=capture):
+            harvest_memory_content("transcript", SAMPLE_MEMORY, config, "# Archive\n- done\n")
+
+        assert "COLD ARCHIVE" in captured[0]
+        assert "done" in captured[0]
+
+    def test_malformed_response_sets_malformed_flag(self):
+        config = Config(harvest_chunk_tokens=0)
+        with patch("memsync.sync.call_llm", return_value=self._llm_result("not a memory file")):
+            result = harvest_memory_content("transcript", SAMPLE_MEMORY, config)
+        assert result["malformed"] is True
+
+
+class TestMergeCandidatesMalformed:
+    def test_malformed_response_sets_malformed_flag(self):
+        from memsync.sync import merge_candidates_into_memory
+        config = Config()
+        with patch("memsync.sync.call_llm", return_value={
+            "text": "not a memory file", "input_tokens": 5, "output_tokens": 5, "truncated": False,
+        }):
+            result = merge_candidates_into_memory("- fact\n", SAMPLE_MEMORY, config)
+        assert result["malformed"] is True
