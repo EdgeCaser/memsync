@@ -72,7 +72,7 @@ class Config:
     gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
     ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     ollama_model: str = "llama3.2:3b"        # ~2GB RAM; good balance of quality and Pi headroom
-    ollama_timeout: int = 120                # seconds; caps fallback burn time on weak hardware
+    ollama_timeout: int = 300                # seconds; covers cold-load of mid-sized models (qwen2.5:14b)
     ollama_num_ctx: int = 8192               # context window; 32K OOMs the 1b on an 8GB Pi
     harvest_chunk_tokens: int = 6000         # split transcripts into chunks this size; 0 = one-shot
     chunk_inter_call_sleep: int = 5          # seconds between chunk extract calls; avoids RPM 429s

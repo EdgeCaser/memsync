@@ -19,6 +19,7 @@ YOUR JOB:
 - Demote completed items from "Current priorities" to a brief "Recent completions" section
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- NEVER add a bullet that already exists verbatim or near-verbatim in the same section
 - If nothing meaningful changed, return the file UNCHANGED
 
 RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
@@ -44,6 +45,7 @@ Then merge those extractions into the existing memory file:
 - Demote completed items from "Current priorities" to a brief "Recent completions" section
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- NEVER add a bullet that already exists verbatim or near-verbatim in the same section
 - If the conversation contained nothing worth persisting, return the file UNCHANGED
 
 RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
@@ -73,6 +75,7 @@ You will receive a list of candidate facts extracted from a recent session. Merg
 - Demote completed items from "Current priorities" to a brief "Recent completions" section
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- NEVER add a bullet that already exists verbatim or near-verbatim in the same section
 - If none of the candidates add meaningful new information, return the file UNCHANGED
 
 RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
@@ -127,6 +130,7 @@ SESSION TRANSCRIPT:
         }
 
     updated_content = enforce_hard_constraints(current_memory, updated_content)
+    updated_content = _deduplicate_memory(updated_content)
     changed = updated_content != current_memory.strip()
 
     return {
@@ -190,6 +194,7 @@ CANDIDATE FACTS:
         }
 
     updated_content = enforce_hard_constraints(current_memory, updated_content)
+    updated_content = _deduplicate_memory(updated_content)
     changed = updated_content != current_memory.strip()
 
     return {
@@ -351,6 +356,7 @@ SESSION NOTES:
 
     # Enforce hard constraints in code — model can silently drop them (PITFALLS #1)
     updated_content = enforce_hard_constraints(current_memory, updated_content)
+    updated_content = _deduplicate_memory(updated_content)
 
     changed = updated_content != current_memory.strip()
 
@@ -362,6 +368,29 @@ SESSION NOTES:
         "input_tokens": llm_result["input_tokens"],
         "output_tokens": llm_result["output_tokens"],
     }
+
+
+def _deduplicate_memory(content: str) -> str:
+    """
+    Remove duplicate bullet lines within each section. Keeps the first occurrence.
+    Resets dedup scope at each heading so the same bullet can appear in different sections.
+    """
+    lines = content.splitlines()
+    seen: set[str] = set()
+    result: list[str] = []
+    for line in lines:
+        if re.match(r"^#{1,6}\s+", line):
+            seen = set()
+            result.append(line)
+            continue
+        stripped = line.strip()
+        if stripped and stripped[0] in "-*+":
+            key = re.sub(r"^[-*+]\s+", "", stripped.lower()).strip()
+            if key in seen:
+                continue
+            seen.add(key)
+        result.append(line)
+    return "\n".join(result)
 
 
 def enforce_hard_constraints(old: str, new: str) -> str:

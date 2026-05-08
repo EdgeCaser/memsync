@@ -204,17 +204,47 @@ def _ollama_health_url(base_url: str) -> str:
 
 
 def _check_ollama_reachable(config: Config, timeout: float = 3.0) -> None:
-    """Ensure Ollama is reachable, starting and warming up the model if not."""
+    """Ensure Ollama is reachable AND the target model is warm.
+
+    A running-but-cold Ollama (model not yet in RAM) is the common cause of
+    the very first chat call timing out — the daemon hit this on 5/5 (see
+    commit 2d8a1d0 for the auto-start case). Warm-up is cheap when the model
+    is already loaded, so it's safe to do on every call.
+    """
     import urllib.request
 
     health_url = _ollama_health_url(config.ollama_base_url)
     try:
         urllib.request.urlopen(health_url, timeout=timeout)  # noqa: S310
-        return  # already running
     except Exception:  # noqa: BLE001, S110
-        pass
+        _start_ollama_service(config)
+        return  # _start_ollama_service already warms up
 
-    _start_ollama_service(config)
+    _ensure_model_loaded(config)
+
+
+def _ensure_model_loaded(config: Config) -> None:
+    """Warm up the model if it isn't already resident in RAM.
+
+    Cheap path: query /api/ps to see if the model is loaded. If yes, return
+    immediately. If no (or the probe fails), fall through to a 1-token warm-up.
+    """
+    import json as _json
+    import urllib.request
+
+    parsed = urlparse(config.ollama_base_url)
+    ps_url = f"{parsed.scheme}://{parsed.netloc}/api/ps"
+    try:
+        with urllib.request.urlopen(ps_url, timeout=3) as resp:  # noqa: S310
+            body = _json.loads(resp.read().decode("utf-8", errors="replace"))
+        loaded = {m.get("name") or m.get("model") for m in body.get("models", [])}
+        if config.ollama_model in loaded:
+            return
+    except Exception:  # noqa: BLE001, S110
+        pass  # fall through to warm-up; better safe than sorry
+
+    logger.info("Ollama reachable but model %s not warm — warming up", config.ollama_model)
+    _warmup_ollama_model(config)
 
 
 def _start_ollama_service(config: Config) -> None:
