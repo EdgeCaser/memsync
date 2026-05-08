@@ -151,7 +151,9 @@ def job_nightly_refresh(config: Config) -> None:
             input_data={"session_log": str(session_log), "source": "scheduler"},
             memory_before=current_memory,
             memory_after=result.get("updated_content", current_memory),
-            llm_metadata={k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")},
+            llm_metadata={
+                k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")
+            },
             journal_dir=str(memory_root / "journal"),
         )
 
