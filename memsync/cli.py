@@ -174,7 +174,9 @@ def cmd_init(args: argparse.Namespace, config: Config) -> int:
     # Create empty archive if not present
     archive_path = memory_root / "MEMORY_ARCHIVE.md"
     if not archive_path.exists():
-        archive_path.write_text(load_or_init_archive(Path("/nonexistent/force-new")), encoding="utf-8")
+        archive_path.write_text(
+            load_or_init_archive(Path("/nonexistent/force-new")), encoding="utf-8"
+        )
 
     # Write config
     new_config = Config(
@@ -270,7 +272,9 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         if result["changed"]:
             old_lines = current_memory.strip().splitlines(keepends=True)
             new_lines = result["updated_content"].splitlines(keepends=True)
-            diff = difflib.unified_diff(old_lines, new_lines, fromfile="hot/current", tofile="hot/updated")
+            diff = difflib.unified_diff(
+                old_lines, new_lines, fromfile="hot/current", tofile="hot/updated"
+            )
             diff_text = "".join(diff)
             if diff_text:
                 print("--- hot diff ---")
@@ -278,7 +282,9 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
             if result.get("changed_cold"):
                 old_cold = current_cold.strip().splitlines(keepends=True)
                 new_cold = result["updated_cold"].splitlines(keepends=True)
-                cold_diff = "".join(difflib.unified_diff(old_cold, new_cold, fromfile="cold/current", tofile="cold/updated"))
+                cold_diff = "".join(difflib.unified_diff(
+                    old_cold, new_cold, fromfile="cold/current", tofile="cold/updated"
+                ))
                 if cold_diff:
                     print("--- cold diff ---")
                     print(cold_diff)
@@ -326,7 +332,9 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         input_data={"notes": notes} if args.notes or not args.file else {"file": str(args.file)},
         memory_before=current_memory,
         memory_after=result["updated_content"],
-        llm_metadata={k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")},
+        llm_metadata={
+            k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")
+        },
         journal_dir=str(memory_root / "journal"),
     )
 
@@ -614,7 +622,9 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         if result["changed"]:
             old_lines = current_memory.strip().splitlines(keepends=True)
             new_lines = result["updated_content"].splitlines(keepends=True)
-            diff = difflib.unified_diff(old_lines, new_lines, fromfile="hot/current", tofile="hot/harvested")
+            diff = difflib.unified_diff(
+                old_lines, new_lines, fromfile="hot/current", tofile="hot/harvested"
+            )
             diff_text = "".join(diff)
             if diff_text:
                 print("--- hot diff ---")
@@ -622,7 +632,9 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
             if result.get("changed_cold"):
                 old_cold = current_cold.strip().splitlines(keepends=True)
                 new_cold = result["updated_cold"].splitlines(keepends=True)
-                cold_diff = "".join(difflib.unified_diff(old_cold, new_cold, fromfile="cold/current", tofile="cold/harvested"))
+                cold_diff = "".join(difflib.unified_diff(
+                    old_cold, new_cold, fromfile="cold/current", tofile="cold/harvested"
+                ))
                 if cold_diff:
                     print("--- cold diff ---")
                     print(cold_diff)
@@ -671,7 +683,9 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         input_data={"session_path": str(session_path)},
         memory_before=current_memory,
         memory_after=result["updated_content"],
-        llm_metadata={k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")},
+        llm_metadata={
+            k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")
+        },
         journal_dir=str(memory_root / "journal"),
     )
 
@@ -807,7 +821,11 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
 
     global_memory = memory_root / "GLOBAL_MEMORY.md"
     mem_marker = "✓" if global_memory.exists() else "✗ (run memsync init)"
-    hot_lines = len(global_memory.read_text(encoding="utf-8").splitlines()) if global_memory.exists() else 0
+    hot_lines = (
+        len(global_memory.read_text(encoding="utf-8").splitlines())
+        if global_memory.exists()
+        else 0
+    )
     print(f"Memory (hot):  {global_memory} {mem_marker} ({hot_lines} lines)")
 
     archive_path = memory_root / "MEMORY_ARCHIVE.md"
@@ -863,7 +881,10 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
         removed = orig_lines - dedup_lines
 
         if args.dry_run:
-            print(f"[DRY RUN] {label}: would remove {removed} duplicate(s) ({orig_lines} → {dedup_lines} lines).")
+            print(
+                f"[DRY RUN] {label}: would remove {removed} duplicate(s) "
+                f"({orig_lines} → {dedup_lines} lines)."
+            )
             if removed > 0:
                 diff = difflib.unified_diff(
                     original.splitlines(keepends=True), deduped.splitlines(keepends=True),
@@ -876,7 +897,10 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
             total_removed += removed
             if removed > 0:
                 file_path.write_text(deduped, encoding="utf-8")
-                print(f"  {label}: removed {removed} duplicate(s) ({orig_lines} → {dedup_lines} lines).")
+                print(
+                    f"  {label}: removed {removed} duplicate(s) "
+                    f"({orig_lines} → {dedup_lines} lines)."
+                )
             else:
                 print(f"  {label}: no duplicates found.")
 
@@ -1268,7 +1292,10 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "archive_in_harvest":
         if value.lower() not in ("true", "false"):
-            print(f"Error: archive_in_harvest must be true or false, got {value!r}.", file=sys.stderr)
+            print(
+                f"Error: archive_in_harvest must be true or false, got {value!r}.",
+                file=sys.stderr,
+            )
             return 1
         config = dataclasses.replace(config, archive_in_harvest=value.lower() == "true")
 
@@ -1276,10 +1303,16 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         try:
             ivalue = int(value)
         except ValueError:
-            print(f"Error: archive_max_lines_in_prompt must be an integer, got {value!r}.", file=sys.stderr)
+            print(
+                f"Error: archive_max_lines_in_prompt must be an integer, got {value!r}.",
+                file=sys.stderr,
+            )
             return 1
         if ivalue < 0:
-            print(f"Error: archive_max_lines_in_prompt must be >= 0, got {ivalue}.", file=sys.stderr)
+            print(
+                f"Error: archive_max_lines_in_prompt must be >= 0, got {ivalue}.",
+                file=sys.stderr,
+            )
             return 1
         config = dataclasses.replace(config, archive_max_lines_in_prompt=ivalue)
 
@@ -1622,7 +1655,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # show
     p_show = subparsers.add_parser("show", help="Print current global memory")
-    p_show.add_argument("--archive", action="store_true", help="Show cold archive instead of hot layer")
+    p_show.add_argument(
+        "--archive", action="store_true", help="Show cold archive instead of hot layer"
+    )
     p_show.set_defaults(func=cmd_show)
 
     # diff
