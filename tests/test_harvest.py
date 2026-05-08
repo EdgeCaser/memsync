@@ -541,3 +541,19 @@ class TestChunkedHarvest:
             harvest_memory_content("[USER]\nSomething", SAMPLE_MEMORY, config)
 
         assert len(call_count) == 1
+
+    def test_merge_includes_archive_in_prompt_when_cold_provided(self):
+        """merge_candidates_into_memory should inject cold archive into the LLM user prompt."""
+        config = Config()
+        current_cold = "# Archive\n- something done\n"
+        captured = []
+
+        def fake_llm(system, user, prefill, cfg):
+            captured.append(user)
+            return {"text": SAMPLE_MEMORY, "input_tokens": 5, "output_tokens": 5, "truncated": False}
+
+        with patch("memsync.sync.call_llm", side_effect=fake_llm):
+            merge_candidates_into_memory("- new fact\n", SAMPLE_MEMORY, config, current_cold)
+
+        assert "COLD ARCHIVE" in captured[0]
+        assert "something done" in captured[0]

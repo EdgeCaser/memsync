@@ -1475,7 +1475,7 @@ class TestHarvestAllNonAuto:
 
         captured = []
 
-        def mock_harvest(transcript, memory, cfg):
+        def mock_harvest(transcript, memory, cfg, cold=""):
             captured.append(cfg)
             return self._mock_result(changed=False)
 

@@ -6,30 +6,44 @@ from pathlib import Path
 from memsync.config import Config
 from memsync.llm import call_llm
 
-# The system prompt is load-bearing — see PITFALLS.md #8 before editing.
+_HOT_DELIMITER = "<!-- memsync:hot -->"
+_COLD_DELIMITER = "<!-- memsync:cold -->"
+
+# The system prompts are load-bearing — see PITFALLS.md #8 before editing.
 # Specific phrases matter; don't casually reword them.
-SYSTEM_PROMPT = """You are maintaining a persistent global memory file for an AI assistant user.
-This file is loaded at the start of every Claude Code session, on every machine and project.
-It is the user's identity layer — not project docs, not cold storage.
+SYSTEM_PROMPT = """You are maintaining a persistent two-layer global memory for an AI assistant user.
+Both files are synced across machines. Only the hot layer is loaded into Claude Code sessions.
+
+HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines.
+  Contains: identity, active priorities, standing preferences, hard constraints.
+COLD layer (MEMORY_ARCHIVE.md): never in context — reference only.
+  Contains: completed work, historical decisions, resolved items.
 
 YOUR JOB:
-- Merge new session notes into the existing memory file
-- Keep the file tight (under 400 lines)
+- Merge new session notes into the hot layer
+- Keep the hot layer tight (under 100 lines) — demote completed or stale items to cold
 - Update facts that have changed
-- Demote completed items from "Current priorities" to a brief "Recent completions" section
 - Preserve the user's exact voice, formatting, and section structure
-- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
-- If nothing meaningful changed, return the file UNCHANGED
+- If nothing meaningful changed, return both layers UNCHANGED
 
-RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
+RETURN: Begin your response with the first delimiter — no preamble before it:
+<!-- memsync:hot -->
+[updated GLOBAL_MEMORY.md content]
+<!-- memsync:cold -->
+[updated MEMORY_ARCHIVE.md content]"""
 
 # Harvest prompt: reads a full session transcript and extracts what's worth keeping.
 # Deliberately separate from SYSTEM_PROMPT — different task, different tuning surface.
 # See PITFALLS.md #8 before editing — specific phrases matter.
-HARVEST_SYSTEM_PROMPT = """You are maintaining a persistent global memory file for an AI assistant user.
-This file is loaded at the start of every Claude Code session, on every machine and project.
-It is the user's identity layer — not project docs, not cold storage.
+HARVEST_SYSTEM_PROMPT = """You are maintaining a persistent two-layer global memory for an AI assistant user.
+Both files are synced across machines. Only the hot layer is loaded into Claude Code sessions.
+
+HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines.
+  Contains: identity, active priorities, standing preferences, hard constraints.
+COLD layer (MEMORY_ARCHIVE.md): never in context — reference only.
+  Contains: completed work, historical decisions, resolved items.
 
 Read the conversation transcript below and extract facts worth adding to persistent memory:
 - Decisions made, approaches chosen, or things agreed upon
@@ -39,16 +53,19 @@ Read the conversation transcript below and extract facts worth adding to persist
 - Project or priority status changes
 - Anything the user would want to know in a future session
 
-Then merge those extractions into the existing memory file:
-- Keep the file tight (under 400 lines)
+Then merge those extractions into the appropriate layer:
+- Keep the hot layer tight (under 100 lines) — demote completed or stale items to cold
 - Update facts that have changed
-- Demote completed items from "Current priorities" to a brief "Recent completions" section
 - Preserve the user's exact voice, formatting, and section structure
-- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
-- If the conversation contained nothing worth persisting, return the file UNCHANGED
+- If the conversation contained nothing worth persisting, return both layers UNCHANGED
 
-RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
+RETURN: Begin your response with the first delimiter — no preamble before it:
+<!-- memsync:hot -->
+[updated GLOBAL_MEMORY.md content]
+<!-- memsync:cold -->
+[updated MEMORY_ARCHIVE.md content]"""
 
 # Two-phase chunked harvest prompts. See PITFALLS.md #8 — load-bearing phrases preserved.
 EXTRACT_SYSTEM_PROMPT = """You are scanning a segment of a conversation transcript for facts worth adding to a persistent memory file.
@@ -65,23 +82,86 @@ If nothing in this segment is worth persisting, return exactly: NONE
 
 RETURN: Only the bullet list or NONE. No explanation, no preamble."""
 
-MERGE_SYSTEM_PROMPT = """You are maintaining a persistent global memory file for an AI assistant user.
-This file is loaded at the start of every Claude Code session, on every machine and project.
-It is the user's identity layer — not project docs, not cold storage.
+MERGE_SYSTEM_PROMPT = """You are maintaining a persistent two-layer global memory for an AI assistant user.
+Both files are synced across machines. Only the hot layer is loaded into Claude Code sessions.
 
-You will receive a list of candidate facts extracted from a recent session. Merge them into the memory file:
-- Keep the file tight (under 400 lines)
+HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines.
+  Contains: identity, active priorities, standing preferences, hard constraints.
+COLD layer (MEMORY_ARCHIVE.md): never in context — reference only.
+  Contains: completed work, historical decisions, resolved items.
+
+You will receive candidate facts extracted from a recent session. Merge them into the appropriate layer:
+- Keep the hot layer tight (under 100 lines) — demote completed or stale items to cold
 - Update facts that have changed
-- Demote completed items from "Current priorities" to a brief "Recent completions" section
 - Preserve the user's exact voice, formatting, and section structure
-- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append
+- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
-- If none of the candidates add meaningful new information, return the file UNCHANGED
+- If none of the candidates add meaningful new information, return both layers UNCHANGED
 
-RETURN: Only the updated GLOBAL_MEMORY.md content. No explanation, no preamble."""
+RETURN: Begin your response with the first delimiter — no preamble before it:
+<!-- memsync:hot -->
+[updated GLOBAL_MEMORY.md content]
+<!-- memsync:cold -->
+[updated MEMORY_ARCHIVE.md content]"""
 
 
-def harvest_memory_content(transcript: str, current_memory: str, config: Config) -> dict:
+def _parse_tiered_response(text: str, current_cold: str) -> tuple[str, str]:
+    """
+    Split LLM response into (hot, cold) using delimiters.
+    Falls back to (text, current_cold) when delimiters are absent — safe degradation
+    that preserves backward compat with tests that mock single-file responses.
+    """
+    hot_idx = text.find(_HOT_DELIMITER)
+    cold_idx = text.find(_COLD_DELIMITER)
+
+    if hot_idx == -1 or cold_idx == -1 or cold_idx <= hot_idx:
+        return text, current_cold
+
+    hot = text[hot_idx + len(_HOT_DELIMITER):cold_idx].strip()
+    cold = text[cold_idx + len(_COLD_DELIMITER):].strip()
+    return hot, cold
+
+
+def _truncate_archive_for_prompt(archive: str, max_lines: int) -> str:
+    """
+    Truncate archive to max_lines preserving complete sections.
+    Keeps the most recent sections (bottom of file), adds a truncation notice.
+    """
+    lines = archive.splitlines()
+    if len(lines) <= max_lines:
+        return archive
+
+    section_starts = [i for i, line in enumerate(lines) if re.match(r"^#{1,6}\s+", line)]
+
+    if not section_starts:
+        return "[ARCHIVE TRUNCATED]\n" + "\n".join(lines[-max_lines:])
+
+    kept: list[str] = []
+    lines_used = 0
+    for i in range(len(section_starts) - 1, -1, -1):
+        start = section_starts[i]
+        end = section_starts[i + 1] if i + 1 < len(section_starts) else len(lines)
+        section = lines[start:end]
+        if lines_used + len(section) <= max_lines:
+            kept.insert(0, "\n".join(section))
+            lines_used += len(section)
+        else:
+            break
+
+    if not kept:
+        return "[ARCHIVE TRUNCATED]\n" + "\n".join(lines[-max_lines:])
+
+    return "[ARCHIVE TRUNCATED — showing most recent sections only]\n" + "\n".join(kept)
+
+
+def load_or_init_archive(path: Path) -> str:
+    """Read archive file, or return an empty starter if it doesn't exist yet."""
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return "<!-- memsync archive -->\n# Memory Archive\n\n## Recent completions\n"
+
+
+def harvest_memory_content(transcript: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
     """
     Extract memories from a session transcript and merge them into current_memory.
 
@@ -99,27 +179,32 @@ def harvest_memory_content(transcript: str, current_memory: str, config: Config)
     Does NOT write files — caller handles I/O.
     """
     if config.harvest_chunk_tokens > 0:
-        return _harvest_chunked(transcript, current_memory, config)
-    return _harvest_one_shot(transcript, current_memory, config)
+        return _harvest_chunked(transcript, current_memory, config, current_cold)
+    return _harvest_one_shot(transcript, current_memory, config, current_cold)
 
 
-def _harvest_one_shot(transcript: str, current_memory: str, config: Config) -> dict:
+def _harvest_one_shot(transcript: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
     """Original single-shot path: sends full transcript in one LLM call."""
-    user_prompt = f"""\
-CURRENT GLOBAL MEMORY:
-{current_memory}
+    archive_section = ""
+    if config.archive_in_harvest and current_cold:
+        truncated = _truncate_archive_for_prompt(current_cold, config.archive_max_lines_in_prompt)
+        archive_section = f"\nCOLD ARCHIVE (reference only — never in context):\n{truncated}\n"
 
+    user_prompt = f"""\
+HOT MEMORY (always in context — keep under {config.max_hot_lines} lines):
+{current_memory}{archive_section}
 SESSION TRANSCRIPT:
 {transcript}"""
 
-    prefill = _build_prefill(current_memory)
-    llm_result = call_llm(HARVEST_SYSTEM_PROMPT, user_prompt, prefill, config)
+    llm_result = call_llm(HARVEST_SYSTEM_PROMPT, user_prompt, _HOT_DELIMITER, config)
 
-    updated_content = _strip_model_wrapper(llm_result["text"])
+    raw = _strip_model_wrapper(llm_result["text"])
+    updated_hot, updated_cold = _parse_tiered_response(raw, current_cold)
 
-    if not _looks_like_memory_file(updated_content):
+    if not _looks_like_memory_file(updated_hot):
         return {
-            "updated_content": updated_content,
+            "updated_content": raw,
+            "updated_cold": current_cold,
             "changed": False,
             "truncated": False,
             "malformed": True,
@@ -129,13 +214,18 @@ SESSION TRANSCRIPT:
             "chunks_processed": 1,
         }
 
-    updated_content = enforce_hard_constraints(current_memory, updated_content)
-    updated_content = _deduplicate_memory(updated_content)
-    changed = updated_content != current_memory.strip()
+    updated_hot = enforce_hard_constraints(current_memory, updated_hot)
+    updated_hot = _deduplicate_memory(updated_hot)
+    updated_cold = _deduplicate_memory(updated_cold)
+    changed_hot = updated_hot != current_memory.strip()
+    changed_cold = updated_cold != current_cold.strip()
 
     return {
-        "updated_content": updated_content,
-        "changed": changed,
+        "updated_content": updated_hot,
+        "updated_cold": updated_cold,
+        "changed": changed_hot or changed_cold,
+        "changed_hot": changed_hot,
+        "changed_cold": changed_cold,
         "truncated": llm_result["truncated"],
         "malformed": False,
         "input_tokens": llm_result["input_tokens"],
@@ -165,26 +255,31 @@ def extract_candidates_from_chunk(chunk: str, config: Config) -> dict:
     }
 
 
-def merge_candidates_into_memory(candidates: str, current_memory: str, config: Config) -> dict:
+def merge_candidates_into_memory(candidates: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
     """
     Merge a bullet list of extracted candidate facts into current_memory via LLM.
     Returns the same dict shape as harvest_memory_content (without token counts,
     which the caller accumulates across all extract calls).
     """
-    user_prompt = f"""\
-CURRENT GLOBAL MEMORY:
-{current_memory}
+    archive_section = ""
+    if config.archive_in_harvest and current_cold:
+        truncated = _truncate_archive_for_prompt(current_cold, config.archive_max_lines_in_prompt)
+        archive_section = f"\nCOLD ARCHIVE (reference only — never in context):\n{truncated}\n"
 
+    user_prompt = f"""\
+HOT MEMORY (always in context — keep under {config.max_hot_lines} lines):
+{current_memory}{archive_section}
 CANDIDATE FACTS:
 {candidates}"""
 
-    prefill = _build_prefill(current_memory)
-    llm_result = call_llm(MERGE_SYSTEM_PROMPT, user_prompt, prefill, config)
-    updated_content = _strip_model_wrapper(llm_result["text"])
+    llm_result = call_llm(MERGE_SYSTEM_PROMPT, user_prompt, _HOT_DELIMITER, config)
+    raw = _strip_model_wrapper(llm_result["text"])
+    updated_hot, updated_cold = _parse_tiered_response(raw, current_cold)
 
-    if not _looks_like_memory_file(updated_content):
+    if not _looks_like_memory_file(updated_hot):
         return {
-            "updated_content": updated_content,
+            "updated_content": raw,
+            "updated_cold": current_cold,
             "changed": False,
             "truncated": False,
             "malformed": True,
@@ -193,13 +288,18 @@ CANDIDATE FACTS:
             "backend": llm_result.get("backend", "unknown"),
         }
 
-    updated_content = enforce_hard_constraints(current_memory, updated_content)
-    updated_content = _deduplicate_memory(updated_content)
-    changed = updated_content != current_memory.strip()
+    updated_hot = enforce_hard_constraints(current_memory, updated_hot)
+    updated_hot = _deduplicate_memory(updated_hot)
+    updated_cold = _deduplicate_memory(updated_cold)
+    changed_hot = updated_hot != current_memory.strip()
+    changed_cold = updated_cold != current_cold.strip()
 
     return {
-        "updated_content": updated_content,
-        "changed": changed,
+        "updated_content": updated_hot,
+        "updated_cold": updated_cold,
+        "changed": changed_hot or changed_cold,
+        "changed_hot": changed_hot,
+        "changed_cold": changed_cold,
         "truncated": llm_result["truncated"],
         "malformed": False,
         "input_tokens": llm_result["input_tokens"],
@@ -208,7 +308,7 @@ CANDIDATE FACTS:
     }
 
 
-def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> dict:
+def _harvest_chunked(transcript: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
     """Two-phase chunked harvest: extract candidates per chunk, then one merge call."""
     from memsync.harvest import chunk_transcript
 
@@ -218,7 +318,10 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
     if not chunks:
         return {
             "updated_content": current_memory.strip(),
+            "updated_cold": current_cold,
             "changed": False,
+            "changed_hot": False,
+            "changed_cold": False,
             "truncated": False,
             "malformed": False,
             "input_tokens": 0,
@@ -248,7 +351,10 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
     if not candidate_blocks:
         return {
             "updated_content": current_memory.strip(),
+            "updated_cold": current_cold,
             "changed": False,
+            "changed_hot": False,
+            "changed_cold": False,
             "truncated": any_truncated,
             "malformed": False,
             "input_tokens": total_input,
@@ -258,28 +364,12 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config) -> di
         }
 
     combined_candidates = "\n".join(candidate_blocks)
-    merge_result = merge_candidates_into_memory(combined_candidates, current_memory, config)
+    merge_result = merge_candidates_into_memory(combined_candidates, current_memory, config, current_cold)
     merge_result["input_tokens"] += total_input
     merge_result["output_tokens"] += total_output
     merge_result["chunks_processed"] = n_chunks
-    # OR with extract-phase truncation — if any chunk was cut short, surface it
     merge_result["truncated"] = merge_result["truncated"] or any_truncated
-    # backend from merge call wins (most representative — if it fell back, this shows it)
     return merge_result
-
-
-def _build_prefill(current_memory: str) -> str:
-    """
-    Build an assistant prefill string that forces the model to start outputting
-    the memory file rather than a narrative summary.
-
-    Uses the first line of the current memory if it looks like a valid start
-    (heading or comment marker), otherwise falls back to the memsync comment.
-    """
-    first_line = current_memory.strip().splitlines()[0] if current_memory.strip() else ""
-    if first_line.startswith("#") or first_line.startswith("<!--"):
-        return first_line
-    return "<!-- memsync v0.2 -->"
 
 
 def _strip_model_wrapper(content: str) -> str:
@@ -323,30 +413,34 @@ def _looks_like_memory_file(content: str) -> bool:
     return first_line.startswith("#") or first_line.startswith("<!--")
 
 
-def refresh_memory_content(notes: str, current_memory: str, config: Config) -> dict:
+def refresh_memory_content(notes: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
     """
-    Call the configured LLM to merge notes into current_memory.
-    Returns a dict with keys: updated_content (str), changed (bool), malformed (bool).
+    Call the configured LLM to merge notes into current_memory (hot layer).
+    Optionally consults current_cold (archive) to avoid re-adding known facts.
+    Returns a dict with keys: updated_content (hot), updated_cold, changed, malformed.
     Does NOT write files — caller handles I/O.
     """
-    user_prompt = f"""\
-CURRENT GLOBAL MEMORY:
-{current_memory}
+    archive_section = ""
+    if config.archive_in_harvest and current_cold:
+        truncated = _truncate_archive_for_prompt(current_cold, config.archive_max_lines_in_prompt)
+        archive_section = f"\nCOLD ARCHIVE (reference only — never in context):\n{truncated}\n"
 
+    user_prompt = f"""\
+HOT MEMORY (always in context — keep under {config.max_hot_lines} lines):
+{current_memory}{archive_section}
 SESSION NOTES:
 {notes}"""
 
-    prefill = _build_prefill(current_memory)
-    llm_result = call_llm(SYSTEM_PROMPT, user_prompt, prefill, config)
+    llm_result = call_llm(SYSTEM_PROMPT, user_prompt, _HOT_DELIMITER, config)
 
-    updated_content = _strip_model_wrapper(llm_result["text"])
+    raw = _strip_model_wrapper(llm_result["text"])
+    updated_hot, updated_cold = _parse_tiered_response(raw, current_cold)
 
     # Reject responses that look like narrative explanations rather than a memory file.
-    # The model occasionally ignores "no preamble" and returns prose — writing that
-    # verbatim would corrupt GLOBAL_MEMORY.md.
-    if not _looks_like_memory_file(updated_content):
+    if not _looks_like_memory_file(updated_hot):
         return {
-            "updated_content": updated_content,
+            "updated_content": raw,
+            "updated_cold": current_cold,
             "changed": False,
             "truncated": False,
             "malformed": True,
@@ -355,14 +449,19 @@ SESSION NOTES:
         }
 
     # Enforce hard constraints in code — model can silently drop them (PITFALLS #1)
-    updated_content = enforce_hard_constraints(current_memory, updated_content)
-    updated_content = _deduplicate_memory(updated_content)
+    updated_hot = enforce_hard_constraints(current_memory, updated_hot)
+    updated_hot = _deduplicate_memory(updated_hot)
+    updated_cold = _deduplicate_memory(updated_cold)
 
-    changed = updated_content != current_memory.strip()
+    changed_hot = updated_hot != current_memory.strip()
+    changed_cold = updated_cold != current_cold.strip()
 
     return {
-        "updated_content": updated_content,
-        "changed": changed,
+        "updated_content": updated_hot,
+        "updated_cold": updated_cold,
+        "changed": changed_hot or changed_cold,
+        "changed_hot": changed_hot,
+        "changed_cold": changed_cold,
         "truncated": llm_result["truncated"],
         "malformed": False,
         "input_tokens": llm_result["input_tokens"],

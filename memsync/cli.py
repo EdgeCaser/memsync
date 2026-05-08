@@ -24,6 +24,7 @@ from memsync.llm import LLMError
 from memsync.providers import all_providers, auto_detect, get_provider
 from memsync.sync import (
     harvest_memory_content,
+    load_or_init_archive,
     load_or_init_memory,
     log_session_notes,
     refresh_memory_content,
@@ -170,6 +171,11 @@ def cmd_init(args: argparse.Namespace, config: Config) -> int:
         starter = load_or_init_memory(Path("/nonexistent/force-new"))
         global_memory.write_text(starter, encoding="utf-8")
 
+    # Create empty archive if not present
+    archive_path = memory_root / "MEMORY_ARCHIVE.md"
+    if not archive_path.exists():
+        archive_path.write_text(load_or_init_archive(Path("/nonexistent/force-new")), encoding="utf-8")
+
     # Write config
     new_config = Config(
         provider=provider_name,
@@ -239,11 +245,13 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         return 3
 
     current_memory = load_or_init_memory(global_memory)
+    archive_path = memory_root / "MEMORY_ARCHIVE.md"
+    current_cold = load_or_init_archive(archive_path)
 
     print("Refreshing global memory...", end=" ", flush=True)
 
     try:
-        result = refresh_memory_content(notes, current_memory, config)
+        result = refresh_memory_content(notes, current_memory, config, current_cold)
     except LLMError as e:
         print(f"\nError: LLM request failed: {e}", file=sys.stderr)
         return 5
@@ -262,11 +270,18 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         if result["changed"]:
             old_lines = current_memory.strip().splitlines(keepends=True)
             new_lines = result["updated_content"].splitlines(keepends=True)
-            diff = difflib.unified_diff(old_lines, new_lines, fromfile="current", tofile="updated")
+            diff = difflib.unified_diff(old_lines, new_lines, fromfile="hot/current", tofile="hot/updated")
             diff_text = "".join(diff)
             if diff_text:
-                print("--- diff ---")
+                print("--- hot diff ---")
                 print(diff_text)
+            if result.get("changed_cold"):
+                old_cold = current_cold.strip().splitlines(keepends=True)
+                new_cold = result["updated_cold"].splitlines(keepends=True)
+                cold_diff = "".join(difflib.unified_diff(old_cold, new_cold, fromfile="cold/current", tofile="cold/updated"))
+                if cold_diff:
+                    print("--- cold diff ---")
+                    print(cold_diff)
         else:
             print("No changes detected.")
         return 0
@@ -293,10 +308,15 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         print("no changes.")
         return 0
 
-    # Backup then write
+    # Backup then write hot layer
     backup_path = backup(global_memory, memory_root / "backups")
     global_memory.write_text(result["updated_content"], encoding="utf-8")
     sync_claude_md(global_memory, config.claude_md_target)
+
+    # Write cold layer if changed
+    if result.get("changed_cold") and result.get("updated_cold"):
+        archive_path.write_text(result["updated_cold"], encoding="utf-8")
+
     log_session_notes(notes, memory_root / "sessions")
 
     # Audit journal — see memsync/journal.py
@@ -306,13 +326,17 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         input_data={"notes": notes} if args.notes or not args.file else {"file": str(args.file)},
         memory_before=current_memory,
         memory_after=result["updated_content"],
-        llm_metadata={k: v for k, v in result.items() if k != "updated_content"},
+        llm_metadata={k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")},
         journal_dir=str(memory_root / "journal"),
     )
 
     print("done.")
     print(f"  Backup:    {backup_path}")
-    print(f"  Memory:    {global_memory}")
+    hot_lines = len(result["updated_content"].splitlines())
+    cold_lines = len(result.get("updated_cold", "").splitlines())
+    print(f"  Hot:       {global_memory} ({hot_lines} lines)")
+    if result.get("changed_cold"):
+        print(f"  Cold:      {archive_path} ({cold_lines} lines)")
     print("  CLAUDE.md synced ✓")
     return 0
 
@@ -362,7 +386,10 @@ def _harvest_all(
         config = dataclasses.replace(config, model=args.model)
 
     current_memory = load_or_init_memory(global_memory)
+    archive_path = memory_root / "MEMORY_ARCHIVE.md"
+    current_cold = load_or_init_archive(archive_path)
     changed_any = False
+    changed_cold_any = False
     errors = 0
     _first_call = True
 
@@ -382,7 +409,7 @@ def _harvest_all(
         _first_call = False
 
         try:
-            result = harvest_memory_content(transcript, current_memory, config)
+            result = harvest_memory_content(transcript, current_memory, config, current_cold)
         except LLMError as e:
             print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
             errors += 1
@@ -418,6 +445,9 @@ def _harvest_all(
         if result["changed"]:
             current_memory = result["updated_content"]
             changed_any = True
+            if result.get("changed_cold") and result.get("updated_cold"):
+                current_cold = result["updated_cold"]
+                changed_cold_any = True
             if not args.auto:
                 backend = result.get("backend", "unknown")
                 chunks = result.get("chunks_processed", 1)
@@ -431,10 +461,16 @@ def _harvest_all(
         backup_path = backup(global_memory, memory_root / "backups")
         global_memory.write_text(current_memory, encoding="utf-8")
         sync_claude_md(global_memory, config.claude_md_target)
+        if changed_cold_any:
+            archive_path.write_text(current_cold, encoding="utf-8")
         if not args.auto:
+            hot_lines = len(current_memory.splitlines())
             print("\ndone.")
             print(f"  Backup:    {backup_path}")
-            print(f"  Memory:    {global_memory}")
+            print(f"  Hot:       {global_memory} ({hot_lines} lines)")
+            if changed_cold_any:
+                cold_lines = len(current_cold.splitlines())
+                print(f"  Cold:      {archive_path} ({cold_lines} lines)")
             print("  CLAUDE.md synced ✓")
     else:
         if not args.auto:
@@ -550,12 +586,14 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         config = dataclasses.replace(config, model=args.model)
 
     current_memory = load_or_init_memory(global_memory)
+    archive_path = memory_root / "MEMORY_ARCHIVE.md"
+    current_cold = load_or_init_archive(archive_path)
 
     if not args.auto:
         print("Harvesting session...", end=" ", flush=True)
 
     try:
-        result = harvest_memory_content(transcript, current_memory, config)
+        result = harvest_memory_content(transcript, current_memory, config, current_cold)
     except LLMError as e:
         print(f"\nError: LLM request failed: {e}", file=sys.stderr)
         return 5
@@ -576,13 +614,18 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         if result["changed"]:
             old_lines = current_memory.strip().splitlines(keepends=True)
             new_lines = result["updated_content"].splitlines(keepends=True)
-            diff = difflib.unified_diff(
-                old_lines, new_lines, fromfile="current", tofile="harvested"
-            )
+            diff = difflib.unified_diff(old_lines, new_lines, fromfile="hot/current", tofile="hot/harvested")
             diff_text = "".join(diff)
             if diff_text:
-                print("--- diff ---")
+                print("--- hot diff ---")
                 print(diff_text)
+            if result.get("changed_cold"):
+                old_cold = current_cold.strip().splitlines(keepends=True)
+                new_cold = result["updated_cold"].splitlines(keepends=True)
+                cold_diff = "".join(difflib.unified_diff(old_cold, new_cold, fromfile="cold/current", tofile="cold/harvested"))
+                if cold_diff:
+                    print("--- cold diff ---")
+                    print(cold_diff)
         else:
             print("No changes detected.")
         return 0
@@ -618,6 +661,9 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
     global_memory.write_text(result["updated_content"], encoding="utf-8")
     sync_claude_md(global_memory, config.claude_md_target)
 
+    if result.get("changed_cold") and result.get("updated_cold"):
+        archive_path.write_text(result["updated_cold"], encoding="utf-8")
+
     # Audit journal — see memsync/journal.py
     from memsync.journal import log_transaction
     log_transaction(
@@ -625,14 +671,18 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         input_data={"session_path": str(session_path)},
         memory_before=current_memory,
         memory_after=result["updated_content"],
-        llm_metadata={k: v for k, v in result.items() if k != "updated_content"},
+        llm_metadata={k: v for k, v in result.items() if k not in ("updated_content", "updated_cold")},
         journal_dir=str(memory_root / "journal"),
     )
 
     if not args.auto:
         print("done.")
         print(f"  Backup:    {backup_path}")
-        print(f"  Memory:    {global_memory}")
+        hot_lines = len(result["updated_content"].splitlines())
+        print(f"  Hot:       {global_memory} ({hot_lines} lines)")
+        if result.get("changed_cold"):
+            cold_lines = len(result.get("updated_cold", "").splitlines())
+            print(f"  Cold:      {archive_path} ({cold_lines} lines)")
         print("  CLAUDE.md synced ✓")
 
     return 0
@@ -653,10 +703,18 @@ def cmd_usage(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_show(args: argparse.Namespace, config: Config) -> int:
-    """Print current GLOBAL_MEMORY.md to stdout."""
+    """Print current GLOBAL_MEMORY.md (or MEMORY_ARCHIVE.md with --archive) to stdout."""
     memory_root, code = _require_memory_root(config)
     if memory_root is None:
         return code
+
+    if getattr(args, "archive", False):
+        archive_path = memory_root / "MEMORY_ARCHIVE.md"
+        if not archive_path.exists():
+            print("No archive yet. Run a harvest or refresh first.", file=sys.stderr)
+            return 3
+        print(archive_path.read_text(encoding="utf-8"))
+        return 0
 
     global_memory = memory_root / "GLOBAL_MEMORY.md"
     if not global_memory.exists():
@@ -749,7 +807,13 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
 
     global_memory = memory_root / "GLOBAL_MEMORY.md"
     mem_marker = "✓" if global_memory.exists() else "✗ (run memsync init)"
-    print(f"Memory:        {global_memory} {mem_marker}")
+    hot_lines = len(global_memory.read_text(encoding="utf-8").splitlines()) if global_memory.exists() else 0
+    print(f"Memory (hot):  {global_memory} {mem_marker} ({hot_lines} lines)")
+
+    archive_path = memory_root / "MEMORY_ARCHIVE.md"
+    if archive_path.exists():
+        cold_lines = len(archive_path.read_text(encoding="utf-8").splitlines())
+        print(f"Archive (cold):{archive_path} ✓ ({cold_lines} lines)")
 
     target = config.claude_md_target
     if target.is_symlink():
@@ -773,7 +837,7 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
-    """Remove duplicate bullet lines from GLOBAL_MEMORY.md without an LLM call."""
+    """Remove duplicate bullet lines from both memory layers without an LLM call."""
     from memsync.sync import _deduplicate_memory
 
     memory_root, code = _require_memory_root(config)
@@ -785,37 +849,44 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
         print("Error: GLOBAL_MEMORY.md not found. Run 'memsync init' first.", file=sys.stderr)
         return 3
 
-    original = global_memory.read_text(encoding="utf-8")
-    deduped = _deduplicate_memory(original)
+    targets = [(global_memory, "hot")]
+    archive_path = memory_root / "MEMORY_ARCHIVE.md"
+    if archive_path.exists():
+        targets.append((archive_path, "cold"))
 
-    original_lines = len(original.splitlines())
-    deduped_lines = len(deduped.splitlines())
-    removed = original_lines - deduped_lines
+    total_removed = 0
+    for file_path, label in targets:
+        original = file_path.read_text(encoding="utf-8")
+        deduped = _deduplicate_memory(original)
+        orig_lines = len(original.splitlines())
+        dedup_lines = len(deduped.splitlines())
+        removed = orig_lines - dedup_lines
+
+        if args.dry_run:
+            print(f"[DRY RUN] {label}: would remove {removed} duplicate(s) ({orig_lines} → {dedup_lines} lines).")
+            if removed > 0:
+                diff = difflib.unified_diff(
+                    original.splitlines(keepends=True), deduped.splitlines(keepends=True),
+                    fromfile=f"{label}/current", tofile=f"{label}/deduped",
+                )
+                diff_text = "".join(diff)
+                if diff_text:
+                    print(diff_text)
+        else:
+            total_removed += removed
+            if removed > 0:
+                file_path.write_text(deduped, encoding="utf-8")
+                print(f"  {label}: removed {removed} duplicate(s) ({orig_lines} → {dedup_lines} lines).")
+            else:
+                print(f"  {label}: no duplicates found.")
 
     if args.dry_run:
-        print(f"[DRY RUN] Would remove {removed} duplicate line(s) ({original_lines} → {deduped_lines}).")
-        if removed > 0:
-            old_l = original.splitlines(keepends=True)
-            new_l = deduped.splitlines(keepends=True)
-            diff = difflib.unified_diff(old_l, new_l, fromfile="current", tofile="deduped")
-            diff_text = "".join(diff)
-            if diff_text:
-                print(diff_text)
         return 0
 
-    if removed == 0:
-        print("No duplicate bullets found.")
-        return 0
-
-    backup_path = backup(global_memory, memory_root / "backups")
-    global_memory.write_text(deduped, encoding="utf-8")
-    from memsync.claude_md import sync as sync_claude_md
-    sync_claude_md(global_memory, config.claude_md_target)
-
-    print(f"Removed {removed} duplicate line(s) ({original_lines} → {deduped_lines}).")
-    print(f"  Backup:    {backup_path}")
-    print(f"  Memory:    {global_memory}")
-    print("  CLAUDE.md synced ✓")
+    if total_removed > 0:
+        from memsync.claude_md import sync as sync_claude_md
+        sync_claude_md(global_memory, config.claude_md_target)
+        print("  CLAUDE.md synced ✓")
     return 0
 
 
@@ -1062,6 +1133,7 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
         "ollama_base_url", "ollama_model", "ollama_timeout", "ollama_num_ctx",
         "harvest_chunk_tokens", "chunk_inter_call_sleep",
+        "max_hot_lines", "archive_in_harvest", "archive_max_lines_in_prompt",
     }
     if key not in valid_keys:
         print(
@@ -1182,6 +1254,34 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
             )
             return 1
         config = dataclasses.replace(config, chunk_inter_call_sleep=ivalue)
+
+    elif key == "max_hot_lines":
+        try:
+            ivalue = int(value)
+        except ValueError:
+            print(f"Error: max_hot_lines must be an integer, got {value!r}.", file=sys.stderr)
+            return 1
+        if ivalue < 10:
+            print(f"Error: max_hot_lines must be >= 10, got {ivalue}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, max_hot_lines=ivalue)
+
+    elif key == "archive_in_harvest":
+        if value.lower() not in ("true", "false"):
+            print(f"Error: archive_in_harvest must be true or false, got {value!r}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, archive_in_harvest=value.lower() == "true")
+
+    elif key == "archive_max_lines_in_prompt":
+        try:
+            ivalue = int(value)
+        except ValueError:
+            print(f"Error: archive_max_lines_in_prompt must be an integer, got {value!r}.", file=sys.stderr)
+            return 1
+        if ivalue < 0:
+            print(f"Error: archive_max_lines_in_prompt must be >= 0, got {ivalue}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, archive_max_lines_in_prompt=ivalue)
 
     config.save()
     print(f"Set {key} = {value}")
@@ -1522,6 +1622,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # show
     p_show = subparsers.add_parser("show", help="Print current global memory")
+    p_show.add_argument("--archive", action="store_true", help="Show cold archive instead of hot layer")
     p_show.set_defaults(func=cmd_show)
 
     # diff
