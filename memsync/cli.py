@@ -299,6 +299,17 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     sync_claude_md(global_memory, config.claude_md_target)
     log_session_notes(notes, memory_root / "sessions")
 
+    # Audit journal — see memsync/journal.py
+    from memsync.journal import log_transaction
+    log_transaction(
+        transaction_type="refresh",
+        input_data={"notes": notes} if args.notes or not args.file else {"file": str(args.file)},
+        memory_before=current_memory,
+        memory_after=result["updated_content"],
+        llm_metadata={k: v for k, v in result.items() if k != "updated_content"},
+        journal_dir=str(memory_root / "journal"),
+    )
+
     print("done.")
     print(f"  Backup:    {backup_path}")
     print(f"  Memory:    {global_memory}")
@@ -428,6 +439,20 @@ def _harvest_all(
     else:
         if not args.auto:
             print("\nNo memory changes.")
+
+    # Audit journal — one entry per --all sweep summarising the batch.
+    from memsync.journal import log_transaction
+    log_transaction(
+        transaction_type="harvest_all",
+        input_data={
+            "session_count": len(new_sessions),
+            "sessions": [p.stem for p in new_sessions],
+        },
+        memory_before="",  # batch — per-session before/after isn't meaningful here
+        memory_after=current_memory,
+        llm_metadata={"changed": changed_any, "errors": errors},
+        journal_dir=str(memory_root / "journal"),
+    )
 
     return 1 if errors else 0
 
@@ -593,6 +618,17 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
     global_memory.write_text(result["updated_content"], encoding="utf-8")
     sync_claude_md(global_memory, config.claude_md_target)
 
+    # Audit journal — see memsync/journal.py
+    from memsync.journal import log_transaction
+    log_transaction(
+        transaction_type="harvest",
+        input_data={"session_path": str(session_path)},
+        memory_before=current_memory,
+        memory_after=result["updated_content"],
+        llm_metadata={k: v for k, v in result.items() if k != "updated_content"},
+        journal_dir=str(memory_root / "journal"),
+    )
+
     if not args.auto:
         print("done.")
         print(f"  Backup:    {backup_path}")
@@ -733,6 +769,53 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
         sessions = list(session_dir.glob("*.md"))
         print(f"Session logs:  {len(sessions)} day(s)")
 
+    return 0
+
+
+def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
+    """Remove duplicate bullet lines from GLOBAL_MEMORY.md without an LLM call."""
+    from memsync.sync import _deduplicate_memory
+
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+
+    global_memory = memory_root / "GLOBAL_MEMORY.md"
+    if not global_memory.exists():
+        print("Error: GLOBAL_MEMORY.md not found. Run 'memsync init' first.", file=sys.stderr)
+        return 3
+
+    original = global_memory.read_text(encoding="utf-8")
+    deduped = _deduplicate_memory(original)
+
+    original_lines = len(original.splitlines())
+    deduped_lines = len(deduped.splitlines())
+    removed = original_lines - deduped_lines
+
+    if args.dry_run:
+        print(f"[DRY RUN] Would remove {removed} duplicate line(s) ({original_lines} → {deduped_lines}).")
+        if removed > 0:
+            old_l = original.splitlines(keepends=True)
+            new_l = deduped.splitlines(keepends=True)
+            diff = difflib.unified_diff(old_l, new_l, fromfile="current", tofile="deduped")
+            diff_text = "".join(diff)
+            if diff_text:
+                print(diff_text)
+        return 0
+
+    if removed == 0:
+        print("No duplicate bullets found.")
+        return 0
+
+    backup_path = backup(global_memory, memory_root / "backups")
+    global_memory.write_text(deduped, encoding="utf-8")
+    from memsync.claude_md import sync as sync_claude_md
+    sync_claude_md(global_memory, config.claude_md_target)
+
+    print(f"Removed {removed} duplicate line(s) ({original_lines} → {deduped_lines}).")
+    print(f"  Backup:    {backup_path}")
+    print(f"  Memory:    {global_memory}")
+    print("  CLAUDE.md synced ✓")
     return 0
 
 
@@ -1449,6 +1532,11 @@ def build_parser() -> argparse.ArgumentParser:
     # status
     p_status = subparsers.add_parser("status", help="Show paths, provider, and sync state")
     p_status.set_defaults(func=cmd_status)
+
+    # dedup
+    p_dedup = subparsers.add_parser("dedup", help="Remove duplicate bullet lines (no LLM call)")
+    p_dedup.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
+    p_dedup.set_defaults(func=cmd_dedup)
 
     # prune
     p_prune = subparsers.add_parser("prune", help="Remove old backups")

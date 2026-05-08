@@ -1,7 +1,10 @@
 
 import json
+import logging
 import os
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def log_transaction(
@@ -23,25 +26,30 @@ def log_transaction(
         llm_metadata: Metadata from the LLM call (e.g., token counts, model used, success status).
         journal_dir: The directory where journal entries will be stored.
     """
-    os.makedirs(journal_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    transaction_id = f"{transaction_type}_{timestamp}"
+    try:
+        os.makedirs(journal_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        transaction_id = f"{transaction_type}_{timestamp}"
 
-    log_entry = {
-        "transaction_id": transaction_id,
-        "timestamp": datetime.now().isoformat(),
-        "transaction_type": transaction_type,
-        "input_data": input_data,
-        "memory_before": memory_before,
-        "memory_after": memory_after,
-        "llm_metadata": llm_metadata,
-    }
+        log_entry = {
+            "transaction_id": transaction_id,
+            "timestamp": datetime.now().isoformat(),
+            "transaction_type": transaction_type,
+            "input_data": input_data,
+            "memory_before": memory_before,
+            "memory_after": memory_after,
+            "llm_metadata": llm_metadata,
+        }
 
-    file_path = os.path.join(journal_dir, f"{transaction_id}.json")
-    with open(file_path, "w") as f:
-        json.dump(log_entry, f, indent=2)
+        file_path = os.path.join(journal_dir, f"{transaction_id}.json")
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(log_entry, f, indent=2, ensure_ascii=False)
 
-    print(f"Transaction logged to: {file_path}")
+        logger.debug("Transaction logged to: %s", file_path)
+    except Exception:
+        # Audit-log failure must never break a refresh/harvest. The daemon's
+        # exception handler would mask the real outcome if we let this raise.
+        logger.exception("Failed to write journal entry for %s", transaction_type)
 
 if __name__ == "__main__":
     # Example usage for testing

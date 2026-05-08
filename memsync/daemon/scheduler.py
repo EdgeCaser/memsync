@@ -139,6 +139,18 @@ def job_nightly_refresh(config: Config) -> None:
         else:
             logger.info("nightly_refresh: no changes for %s", today)
 
+        # Audit journal — log every refresh attempt, not just successful writes,
+        # so the journal also captures no-op nights.
+        from memsync.journal import log_transaction
+        log_transaction(
+            transaction_type="refresh",
+            input_data={"session_log": str(session_log), "source": "scheduler"},
+            memory_before=current_memory,
+            memory_after=result.get("updated_content", current_memory),
+            llm_metadata={k: v for k, v in result.items() if k != "updated_content"},
+            journal_dir=str(memory_root / "journal"),
+        )
+
     except Exception:
         logger.exception("nightly_refresh: unexpected error")
 
@@ -254,6 +266,21 @@ def job_nightly_harvest(config: Config) -> None:
             logger.info("nightly_harvest: memory updated from %d session(s)", len(new_sessions))
         else:
             logger.info("nightly_harvest: no changes from %d session(s)", len(new_sessions))
+
+        # Audit journal — one entry per scheduled sweep summarising the batch.
+        from memsync.journal import log_transaction
+        log_transaction(
+            transaction_type="harvest_all",
+            input_data={
+                "session_count": len(new_sessions),
+                "sessions": [p.stem for p in new_sessions],
+                "source": "scheduler",
+            },
+            memory_before="",
+            memory_after=current_memory,
+            llm_metadata={"changed": changed_any},
+            journal_dir=str(memory_root / "journal"),
+        )
 
     except Exception:
         logger.exception("nightly_harvest: unexpected error")
