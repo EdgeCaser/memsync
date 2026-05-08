@@ -105,6 +105,16 @@ RETURN: Begin your response with the first delimiter — no preamble before it:
 [updated MEMORY_ARCHIVE.md content]"""
 
 
+def _strip_label_prefix(text: str) -> str:
+    """Strip leading label lines (e.g. 'HOT MEMORY...') before the actual markdown content."""
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("<!--"):
+            return "".join(lines[i:])
+    return text
+
+
 def _parse_tiered_response(text: str, current_cold: str) -> tuple[str, str]:
     """
     Split LLM response into (hot, cold) using delimiters.
@@ -117,8 +127,8 @@ def _parse_tiered_response(text: str, current_cold: str) -> tuple[str, str]:
     if hot_idx == -1 or cold_idx == -1 or cold_idx <= hot_idx:
         return text, current_cold
 
-    hot = text[hot_idx + len(_HOT_DELIMITER):cold_idx].strip()
-    cold = text[cold_idx + len(_COLD_DELIMITER):].strip()
+    hot = _strip_label_prefix(text[hot_idx + len(_HOT_DELIMITER):cold_idx].strip())
+    cold = _strip_label_prefix(text[cold_idx + len(_COLD_DELIMITER):].strip())
     return hot, cold
 
 
