@@ -462,10 +462,10 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
 
     if sys.platform == "win32":
         cmd = ["cmd.exe", "/c", "claude", "--print", "--no-session-persistence",
-               "--dangerously-skip-permissions"]
+               "--tools", ""]
     else:
         cmd = ["claude", "--print", "--no-session-persistence",
-               "--dangerously-skip-permissions"]
+               "--tools", ""]
 
     try:
         result = subprocess.run(  # noqa: S603
