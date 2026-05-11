@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from memsync.backups import backup, latest_backup, list_backups, prune
+from memsync.backups import backup, latest_backup, list_archive_backups, list_backups, prune
 
 
 @pytest.fixture
@@ -100,3 +100,39 @@ class TestPrune:
         deleted = prune(backup_dir, keep_days=0)
         assert len(deleted) == 2
         assert all(isinstance(p, Path) for p in deleted)
+
+
+class TestArchiveBackup:
+    """backup() must work for cold-layer files too — see 2026-05 archive-collapse."""
+
+    def test_archive_source_uses_archive_prefix(self, tmp_path):
+        archive = tmp_path / "MEMORY_ARCHIVE.md"
+        archive.write_text("# archive", encoding="utf-8")
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        result = backup(archive, backup_dir)
+        assert result.name.startswith("MEMORY_ARCHIVE_")
+        assert result.suffix == ".md"
+
+    def test_list_archive_backups_only_returns_cold(self, tmp_path):
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        hot = tmp_path / "GLOBAL_MEMORY.md"
+        hot.write_text("hot", encoding="utf-8")
+        cold = tmp_path / "MEMORY_ARCHIVE.md"
+        cold.write_text("cold", encoding="utf-8")
+        backup(hot, backup_dir)
+        backup(cold, backup_dir)
+        archives = list_archive_backups(backup_dir)
+        assert len(archives) == 1
+        assert archives[0].name.startswith("MEMORY_ARCHIVE_")
+
+    def test_prune_covers_archive_backups(self, tmp_path):
+        archive = tmp_path / "MEMORY_ARCHIVE.md"
+        archive.write_text("# archive", encoding="utf-8")
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        b = backup(archive, backup_dir)
+        deleted = prune(backup_dir, keep_days=0)
+        assert b in deleted
+        assert not b.exists()
