@@ -53,28 +53,17 @@ _adc_creds = None
 
 
 def _resolve_backends(config: Config) -> list[tuple[str, object]]:
-    """
-    Return ordered list of (name, callable) backends to attempt.
-
-    Primary backend is config.llm_backend.
-    If that fails, config.fallback_backend is tried next.
-    Set fallback_backend = "none" to disable fallback and hard-error on primary failure.
-    """
-    primary = config.llm_backend
-    fallback = config.fallback_backend
-
-    if primary not in _BACKEND_FNS:
-        raise LLMError(f"Unknown llm_backend '{primary}'. Valid: {', '.join(_BACKEND_FNS)}")
-
-    chain: list[tuple[str, object]] = [(primary, _BACKEND_FNS[primary])]
-
-    if fallback and fallback != "none" and fallback != primary:
-        if fallback not in _BACKEND_FNS:
-            raise LLMError(
-                f"Unknown fallback_backend '{fallback}'. Valid: {', '.join(_BACKEND_FNS)}"
-            )
-        chain.append((fallback, _BACKEND_FNS[fallback]))
-
+    """Return ordered list of (name, callable) backends from config.llm_backends."""
+    chain: list[tuple[str, object]] = []
+    for name in config.llm_backends:
+        if name not in _BACKEND_FNS:
+            logger.warning("Unknown backend '%s' in backends list — skipping", name)
+            continue
+        chain.append((name, _BACKEND_FNS[name]))
+    if not chain:
+        raise LLMError(
+            f"No valid backends configured. Valid: {', '.join(_BACKEND_FNS)}"
+        )
     return chain
 
 
@@ -455,6 +444,92 @@ def _get_adc_creds():
     return _adc_creds
 
 
+def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> dict:  # noqa: ARG001
+    """
+    Call Claude via the locally installed `claude --print` CLI.
+
+    Uses the Max/Pro subscription — no API key or per-token billing.
+    Tools are disabled so this is a pure text-completion call.
+    """
+    import shutil
+
+    if shutil.which("claude") is None:
+        raise RuntimeError(
+            "claude CLI not found on PATH — install from https://claude.ai/code"
+        )
+
+    full_prompt = _inject_prefill(system, prefill) + "\n\n" + user
+
+    if sys.platform == "win32":
+        cmd = ["cmd.exe", "/c", "claude", "--print", "--no-session-persistence"]
+    else:
+        cmd = ["claude", "--print", "--no-session-persistence"]
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,
+            input=full_prompt.encode("utf-8"),
+            capture_output=True,
+            timeout=120,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("claude CLI not found on PATH") from e
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"claude CLI failed (exit {result.returncode}): {stderr}")
+
+    return {
+        "text": result.stdout.decode("utf-8", errors="replace").strip(),
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "truncated": False,
+    }
+
+
+def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  # noqa: ARG001
+    """
+    Call OpenAI via the `codex` CLI (OAuth — no API key needed with a ChatGPT account).
+
+    Install with: npm install -g @openai/codex
+    """
+    import shutil
+
+    if shutil.which("codex") is None:
+        raise RuntimeError(
+            "codex CLI not found — install with: npm install -g @openai/codex"
+        )
+
+    full_prompt = _inject_prefill(system, prefill) + "\n\n" + user
+
+    if sys.platform == "win32":
+        cmd = ["cmd.exe", "/c", "codex", "-q", full_prompt]
+    else:
+        cmd = ["codex", "-q", full_prompt]
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,
+            capture_output=True,
+            timeout=120,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("codex CLI not found on PATH") from e
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"codex CLI failed (exit {result.returncode}): {stderr}")
+
+    return {
+        "text": result.stdout.decode("utf-8", errors="replace").strip(),
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "truncated": False,
+    }
+
+
+_BACKEND_FNS["claude_code"] = _call_claude_code
+_BACKEND_FNS["codex"] = _call_codex
 _BACKEND_FNS["gemini"] = _call_gemini
 _BACKEND_FNS["gemini_cli"] = _call_gemini_cli
 _BACKEND_FNS["ollama"] = _call_ollama
