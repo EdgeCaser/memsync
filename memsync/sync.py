@@ -9,6 +9,14 @@ from memsync.llm import call_llm
 _HOT_DELIMITER = "<!-- memsync:hot -->"
 _COLD_DELIMITER = "<!-- memsync:cold -->"
 
+# Tolerant matchers used by _parse_tiered_response. The LLM occasionally emits
+# tab/extra-space variations inside the delimiter (e.g. "<!--\tmemsync:cold -->")
+# and exact-match find() misses them, with destructive fallback behavior.
+# See: 2026-05 incident where stray tab-delimited tags routed the entire LLM
+# response into the hot layer.
+_HOT_DELIM_RE = re.compile(r"<!--\s*memsync:hot\s*-->")
+_COLD_DELIM_RE = re.compile(r"<!--\s*memsync:cold\s*-->")
+
 # The system prompts are load-bearing — see PITFALLS.md #8 before editing.
 # Specific phrases matter; don't casually reword them.
 SYSTEM_PROMPT = """You are maintaining a persistent two-layer global memory for an AI assistant user.
@@ -118,17 +126,38 @@ def _strip_label_prefix(text: str) -> str:
 def _parse_tiered_response(text: str, current_cold: str) -> tuple[str, str]:
     """
     Split LLM response into (hot, cold) using delimiters.
-    Falls back to (text, current_cold) when delimiters are absent — safe degradation
-    that preserves backward compat with tests that mock single-file responses.
-    """
-    hot_idx = text.find(_HOT_DELIMITER)
-    cold_idx = text.find(_COLD_DELIMITER)
 
-    if hot_idx == -1 or cold_idx == -1 or cold_idx <= hot_idx:
+    Three branches:
+    - both delimiters absent → (text, current_cold). Single-file backward compat
+      (tests mock responses without delimiters; treating those as malformed
+      would be too aggressive).
+    - both delimiters present and in order → parse normally.
+    - one delimiter present but the other missing / out of order → ("", current_cold)
+      to signal malformed. Downstream _looks_like_memory_file rejects empty
+      content and the caller surfaces malformed=True without overwriting hot.
+      Previously this branch fell back to (text, current_cold), which silently
+      dumped the entire LLM response — analysis prose included — into the hot
+      layer when the LLM emitted only a cold delimiter or used a stray tab in
+      one of them. See: 2026-05 incident, quarantine_20260510_2116/.
+
+    Whitespace inside the delimiter tags is tolerated via regex matching so
+    "<!--\\tmemsync:cold -->" is recognised the same as "<!-- memsync:cold -->".
+    """
+    hot_match = _HOT_DELIM_RE.search(text)
+    cold_match = _COLD_DELIM_RE.search(text)
+
+    if hot_match is None and cold_match is None:
         return text, current_cold
 
-    hot = _strip_label_prefix(text[hot_idx + len(_HOT_DELIMITER):cold_idx].strip())
-    cold_raw = text[cold_idx + len(_COLD_DELIMITER):].strip()
+    if (
+        hot_match is None
+        or cold_match is None
+        or cold_match.start() <= hot_match.start()
+    ):
+        return "", current_cold
+
+    hot = _strip_label_prefix(text[hot_match.end():cold_match.start()].strip())
+    cold_raw = text[cold_match.end():].strip()
 
     # Defensive: if the LLM echoed back the truncation marker we injected for the
     # prompt-only view (see _truncate_archive_for_prompt), the "cold" it returned
