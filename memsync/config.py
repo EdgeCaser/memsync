@@ -66,8 +66,9 @@ class Config:
     api_key: str = ""           # Anthropic API key (legacy); stored in config.toml, not env
 
     # [llm] — backend selection and per-backend settings
-    llm_backend: str = "gemini"              # "gemini" | "ollama" | "anthropic"
-    fallback_backend: str = "ollama"         # tried when llm_backend fails; "none" to hard-error
+    llm_backends: list = field(default_factory=lambda: ["gemini", "ollama"])
+    llm_backend: str = "gemini"              # legacy; ignored when llm_backends is set
+    fallback_backend: str = "ollama"         # legacy; ignored when llm_backends is set
     gemini_api_key: str = ""                 # AI Studio key; leave empty to use ADC instead
     gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
     ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
@@ -149,14 +150,25 @@ class Config:
 
         llm_raw = raw.get("llm", {})
 
+        # Resolve backend chain — new list form takes precedence over legacy keys
+        if "backends" in llm_raw:
+            llm_backends = llm_raw["backends"]
+        else:
+            primary = llm_raw.get("backend", "gemini")
+            fallback = llm_raw.get("fallback_backend", "ollama")
+            llm_backends = [primary]
+            if fallback and fallback != "none" and fallback != primary:
+                llm_backends.append(fallback)
+
         instance = cls(
             provider=core.get("provider", "onedrive"),
             model=core.get("model", "claude-sonnet-4-20250514"),
             max_memory_lines=core.get("max_memory_lines", 400),
             max_tokens=core.get("max_tokens", 16384),
             api_key=core.get("api_key", ""),
-            llm_backend=llm_raw.get("backend", "gemini"),
-            fallback_backend=llm_raw.get("fallback_backend", "ollama"),
+            llm_backends=llm_backends,
+            llm_backend=llm_backends[0] if llm_backends else "gemini",
+            fallback_backend=llm_backends[1] if len(llm_backends) > 1 else "none",
             gemini_api_key=llm_raw.get("gemini_api_key", ""),
             gemini_model=llm_raw.get("gemini_model", "gemini-2.5-flash"),
             ollama_base_url=llm_raw.get("ollama_base_url", "http://localhost:11434/v1"),
@@ -220,8 +232,7 @@ class Config:
             f"keep_days = {self.keep_days}",
             "",
             "[llm]",
-            f'backend = "{self.llm_backend}"',
-            f'fallback_backend = "{self.fallback_backend}"',
+            "backends = [" + ", ".join(f'"{b}"' for b in self.llm_backends) + "]",
             f'gemini_model = "{self.gemini_model}"',
             f'ollama_base_url = "{self.ollama_base_url}"',
             f'ollama_model = "{self.ollama_model}"',
