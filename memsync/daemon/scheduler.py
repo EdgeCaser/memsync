@@ -138,6 +138,8 @@ def job_nightly_refresh(config: Config) -> None:
             memory_path.write_text(result["updated_content"], encoding="utf-8")
             sync_claude_md(memory_path, config.claude_md_target)
             if result.get("changed_cold") and result.get("updated_cold"):
+                if archive_path.exists():
+                    backup(archive_path, memory_root / "backups")
                 archive_path.write_text(result["updated_cold"], encoding="utf-8")
             logger.info("nightly_refresh: memory updated for %s", today)
         else:
@@ -276,6 +278,8 @@ def job_nightly_harvest(config: Config) -> None:
             memory_path.write_text(current_memory, encoding="utf-8")
             sync_claude_md(memory_path, config.claude_md_target)
             if changed_cold_any:
+                if archive_path.exists():
+                    backup(archive_path, memory_root / "backups")
                 archive_path.write_text(current_cold, encoding="utf-8")
             logger.info("nightly_harvest: memory updated from %d session(s)", len(new_sessions))
         else:

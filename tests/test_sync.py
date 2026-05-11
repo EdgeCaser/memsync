@@ -276,6 +276,37 @@ class TestParseTieredResponse:
         assert hot == "# Hot"
         assert cold == "# Cold"
 
+    def test_rejects_cold_containing_truncation_marker(self):
+        """Regression: 2026-05 archive-collapse incident.
+
+        When the cold archive is too big to fit fully in the prompt,
+        _truncate_archive_for_prompt prepends "[ARCHIVE TRUNCATED]" and
+        passes the trimmed view to the LLM. If the LLM echoes that marker
+        back inside its cold-delimiter block, accepting it would clobber
+        the real on-disk archive. The parser must fall back to current_cold.
+        """
+        real_archive = "# Archive\n## Recent completions\n- big real content\n"
+        poisoned = (
+            f"{_HOT_DELIMITER}\n# Hot\n- active\n"
+            f"{_COLD_DELIMITER}\n[ARCHIVE TRUNCATED]\n## Recent completions\n"
+        )
+        hot, cold = _parse_tiered_response(poisoned, real_archive)
+        assert "active" in hot
+        assert cold == real_archive  # not the truncated view
+
+    def test_rejects_cold_containing_truncation_with_suffix(self):
+        """The marker has a second variant: '[ARCHIVE TRUNCATED — showing ...]'.
+
+        The substring check must catch both.
+        """
+        real_archive = "# Archive\n- a\n- b\n- c\n"
+        poisoned = (
+            f"{_HOT_DELIMITER}\n# Hot\n"
+            f"{_COLD_DELIMITER}\n[ARCHIVE TRUNCATED — showing most recent sections only]\n## X\n"
+        )
+        hot, cold = _parse_tiered_response(poisoned, real_archive)
+        assert cold == real_archive
+
 
 @pytest.mark.smoke
 class TestTruncateArchiveForPrompt:

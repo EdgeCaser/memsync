@@ -319,8 +319,11 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     global_memory.write_text(result["updated_content"], encoding="utf-8")
     sync_claude_md(global_memory, config.claude_md_target)
 
-    # Write cold layer if changed
+    # Write cold layer if changed — always back up first so cold has the same
+    # safety net as hot (cf. 2026-05 archive-collapse incident).
     if result.get("changed_cold") and result.get("updated_cold"):
+        if archive_path.exists():
+            backup(archive_path, memory_root / "backups")
         archive_path.write_text(result["updated_cold"], encoding="utf-8")
 
     log_session_notes(notes, memory_root / "sessions")
@@ -470,6 +473,8 @@ def _harvest_all(
         global_memory.write_text(current_memory, encoding="utf-8")
         sync_claude_md(global_memory, config.claude_md_target)
         if changed_cold_any:
+            if archive_path.exists():
+                backup(archive_path, memory_root / "backups")
             archive_path.write_text(current_cold, encoding="utf-8")
         if not args.auto:
             hot_lines = len(current_memory.splitlines())
@@ -673,7 +678,10 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
     global_memory.write_text(result["updated_content"], encoding="utf-8")
     sync_claude_md(global_memory, config.claude_md_target)
 
+    # Back up cold before overwrite — same safety net as hot.
     if result.get("changed_cold") and result.get("updated_cold"):
+        if archive_path.exists():
+            backup(archive_path, memory_root / "backups")
         archive_path.write_text(result["updated_cold"], encoding="utf-8")
 
     # Audit journal — see memsync/journal.py

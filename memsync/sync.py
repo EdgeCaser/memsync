@@ -128,7 +128,19 @@ def _parse_tiered_response(text: str, current_cold: str) -> tuple[str, str]:
         return text, current_cold
 
     hot = _strip_label_prefix(text[hot_idx + len(_HOT_DELIMITER):cold_idx].strip())
-    cold = _strip_label_prefix(text[cold_idx + len(_COLD_DELIMITER):].strip())
+    cold_raw = text[cold_idx + len(_COLD_DELIMITER):].strip()
+
+    # Defensive: if the LLM echoed back the truncation marker we injected for the
+    # prompt-only view (see _truncate_archive_for_prompt), the "cold" it returned
+    # is just the truncated *view* it saw, not the full archive. Writing it would
+    # clobber on-disk data. Reject and keep current_cold as the source of truth.
+    # Check the raw segment because _strip_label_prefix below would drop the
+    # marker line (it isn't a markdown heading), hiding the evidence.
+    # See: 2026-05 incident where MEMORY_ARCHIVE.md collapsed to the marker string.
+    if "[ARCHIVE TRUNCATED" in cold_raw:
+        return hot, current_cold
+
+    cold = _strip_label_prefix(cold_raw)
     return hot, cold
 
 
