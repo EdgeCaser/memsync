@@ -534,6 +534,7 @@ class TestCmdDoctor:
         monkeypatch.setattr("memsync.cli.get_config_path",
                             lambda: tmp_path / "config.toml")
         (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", tmp_path / "nonexistent.pid")
 
         result = cmd_doctor(_args(), config)
         assert result == 0
@@ -1272,6 +1273,7 @@ class TestCmdDoctorExtras:
         monkeypatch.setattr("memsync.cli.get_config_path",
                             lambda: tmp_path / "config.toml")
         (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", tmp_path / "nonexistent.pid")
 
         from memsync.claude_md import sync as sync_claude_md
         config_with_key.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
