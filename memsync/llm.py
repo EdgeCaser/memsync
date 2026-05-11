@@ -461,16 +461,18 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
     full_prompt = _inject_prefill(system, prefill) + "\n\n" + user
 
     if sys.platform == "win32":
-        cmd = ["cmd.exe", "/c", "claude", "--print", "--no-session-persistence"]
+        cmd = ["cmd.exe", "/c", "claude", "--print", "--no-session-persistence",
+               "--dangerously-skip-permissions"]
     else:
-        cmd = ["claude", "--print", "--no-session-persistence"]
+        cmd = ["claude", "--print", "--no-session-persistence",
+               "--dangerously-skip-permissions"]
 
     try:
         result = subprocess.run(  # noqa: S603
             cmd,
             input=full_prompt.encode("utf-8"),
             capture_output=True,
-            timeout=120,
+            timeout=600,
         )
     except FileNotFoundError as e:
         raise RuntimeError("claude CLI not found on PATH") from e
