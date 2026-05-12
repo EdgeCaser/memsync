@@ -152,8 +152,8 @@ def _call_gemini(system: str, user: str, prefill: str, config: Config) -> dict:
     Call the Gemini API using the native generateContent endpoint.
 
     Auth priority:
-      1. gemini_api_key in config  →  passed as ?key= query param (no Bearer conflict)
-      2. Application Default Credentials  →  OAuth Bearer token, no ?key=
+      1. gemini_api_key in config  →  passed as x-goog-api-key header
+      2. Application Default Credentials  →  OAuth Bearer token
     """
     try:
         import httpx
@@ -171,8 +171,11 @@ def _call_gemini(system: str, user: str, prefill: str, config: Config) -> dict:
     }
 
     if config.gemini_api_key:
-        url = f"{url_base}?key={config.gemini_api_key}"
-        headers = {"Content-Type": "application/json"}
+        url = url_base
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": config.gemini_api_key,
+        }
     else:
         # ADC path — Bearer token, no ?key= param
         creds = _get_adc_creds()
@@ -362,6 +365,7 @@ def _warmup_ollama_model(config: Config) -> None:
         api_key="ollama",
         base_url=config.ollama_base_url,
         timeout=_OLLAMA_WARMUP_TIMEOUT,
+        max_retries=0,
     )
     try:
         client.chat.completions.create(
@@ -438,6 +442,7 @@ def _call_ollama(system: str, user: str, prefill: str, config: Config) -> dict:
         api_key="ollama",  # required by the openai client, not validated by Ollama
         base_url=config.ollama_base_url,
         timeout=config.ollama_timeout,
+        max_retries=0,
     )
 
     response = client.chat.completions.create(

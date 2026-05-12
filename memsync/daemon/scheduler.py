@@ -13,7 +13,9 @@ raising. This is load-bearing — see DAEMON_PITFALLS.md #2.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
+import time
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -23,6 +25,23 @@ from apscheduler.triggers.cron import CronTrigger
 from memsync.config import Config
 
 logger = logging.getLogger("memsync.daemon")
+
+
+def _daemon_llm_config(config: Config) -> Config:
+    """Return daemon-safe LLM config, avoiding local Ollama unless explicitly enabled."""
+    if config.daemon.harvest_allow_ollama:
+        return config
+
+    backends = [backend for backend in config.llm_backends if backend != "ollama"]
+    if backends == config.llm_backends:
+        return config
+
+    return dataclasses.replace(
+        config,
+        llm_backends=backends,
+        llm_backend=backends[0] if backends else "none",
+        fallback_backend=backends[1] if len(backends) > 1 else "none",
+    )
 
 
 def build_scheduler(
@@ -46,6 +65,8 @@ def build_scheduler(
             id="nightly_refresh",
             name="Nightly memory refresh",
             misfire_grace_time=3600,  # run even if missed by up to 1 hour
+            coalesce=True,
+            max_instances=1,
         )
 
     if config.daemon.harvest_enabled:
@@ -56,6 +77,8 @@ def build_scheduler(
             id="nightly_harvest",
             name="Nightly session harvest",
             misfire_grace_time=3600,
+            coalesce=True,
+            max_instances=1,
         )
 
     if config.daemon.backup_mirror_path:
@@ -131,7 +154,8 @@ def job_nightly_refresh(config: Config) -> None:
         archive_path = memory_root / "MEMORY_ARCHIVE.md"
         current_memory = memory_path.read_text(encoding="utf-8")
         current_cold = load_or_init_archive(archive_path)
-        result = refresh_memory_content(notes, current_memory, config, current_cold)
+        llm_config = _daemon_llm_config(config)
+        result = refresh_memory_content(notes, current_memory, llm_config, current_cold)
 
         if result["changed"]:
             backup(memory_path, memory_root / "backups")
@@ -184,6 +208,7 @@ def job_nightly_harvest(config: Config) -> None:
     from memsync.sync import harvest_memory_content, load_or_init_archive, load_or_init_memory
 
     try:
+        started_at = time.monotonic()
         provider = get_provider(config.provider)
         sync_root = config.sync_root or provider.detect()
         if not sync_root:
@@ -221,6 +246,15 @@ def job_nightly_harvest(config: Config) -> None:
             logger.debug("nightly_harvest: no new sessions to process")
             return
 
+        max_sessions = config.daemon.harvest_max_sessions_per_run
+        if max_sessions > 0 and len(new_sessions) > max_sessions:
+            logger.warning(
+                "nightly_harvest: limiting run to %d of %d new session(s)",
+                max_sessions,
+                len(new_sessions),
+            )
+            new_sessions = new_sessions[:max_sessions]
+
         logger.info("nightly_harvest: processing %d new session(s)", len(new_sessions))
 
         # Process sessions sequentially — each one builds on the updated memory
@@ -229,8 +263,18 @@ def job_nightly_harvest(config: Config) -> None:
         current_cold = load_or_init_archive(archive_path)
         changed_any = False
         changed_cold_any = False
+        llm_config = _daemon_llm_config(config)
 
         for session_path in new_sessions:
+            max_runtime = config.daemon.harvest_max_runtime_seconds
+            elapsed = time.monotonic() - started_at
+            if max_runtime > 0 and elapsed >= max_runtime:
+                logger.warning(
+                    "nightly_harvest: stopping after %.0fs runtime budget; remaining sessions will retry next run",
+                    elapsed,
+                )
+                break
+
             transcript, message_count = read_session_transcript(session_path)
 
             if not transcript.strip():
@@ -239,7 +283,7 @@ def job_nightly_harvest(config: Config) -> None:
                 continue
 
             try:
-                result = harvest_memory_content(transcript, current_memory, config, current_cold)
+                result = harvest_memory_content(transcript, current_memory, llm_config, current_cold)
             except Exception:
                 logger.warning(
                     "nightly_harvest: all backends failed for %s — will retry next run",

@@ -12,6 +12,7 @@ from memsync.llm import LLMError
 
 from memsync.cli import (
     _harvest_all,
+    _scheduled_harvest_config,
     build_parser,
     cmd_config_set,
     cmd_config_show,
@@ -1114,6 +1115,65 @@ class TestHarvestAll:
             "- Never skip tests\n"
         )
         assert global_memory.read_text(encoding="utf-8") == original
+
+    def test_auto_removes_ollama_from_scheduled_config(self, memory_file, monkeypatch):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+
+        projects_dir = tmp_path / "claude-projects"
+        proj = projects_dir / "my-project"
+        proj.mkdir(parents=True)
+        (proj / "session-001.jsonl").write_text(
+            '{"type":"user","message":{"content":"hi"}}',
+            encoding="utf-8",
+        )
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        captured = []
+
+        def mock_harvest(transcript, memory, cfg, cold=""):
+            captured.append(cfg)
+            return self._mock_harvest_result(changed=False)
+
+        with patch("memsync.cli.harvest_memory_content", side_effect=mock_harvest):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                _harvest_all(_harvest_args(auto=True), config, memory_root, global_memory)
+
+        assert "ollama" not in captured[0].llm_backends
+
+    def test_auto_limits_sessions_per_run(self, memory_file, monkeypatch):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+
+        projects_dir = tmp_path / "claude-projects"
+        proj = projects_dir / "my-project"
+        proj.mkdir(parents=True)
+        for i in range(3):
+            (proj / f"session-{i:03d}.jsonl").write_text(
+                '{"type":"user","message":{"content":"hi"}}',
+                encoding="utf-8",
+            )
+        _redirect_projects_dir(monkeypatch, projects_dir)
+        config = dataclasses.replace(
+            config,
+            daemon=dataclasses.replace(config.daemon, harvest_max_sessions_per_run=2),
+        )
+
+        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_harvest_result(changed=False)) as mock_harvest:
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                _harvest_all(_harvest_args(auto=True), config, memory_root, global_memory)
+
+        assert mock_harvest.call_count == 2
+
+
+class TestScheduledHarvestConfig:
+    def test_keeps_ollama_when_allowed(self):
+        config = Config()
+        config = dataclasses.replace(
+            config,
+            daemon=dataclasses.replace(config.daemon, harvest_allow_ollama=True),
+        )
+        assert _scheduled_harvest_config(config).llm_backends == config.llm_backends
 
 
 # ---------------------------------------------------------------------------

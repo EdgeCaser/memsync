@@ -64,6 +64,23 @@ def _configured_backends(config: Config) -> list[str]:
     return list(DEFAULT_LLM_BACKENDS)
 
 
+def _scheduled_harvest_config(config: Config) -> Config:
+    """Return config for unattended harvest runs, avoiding local Ollama unless enabled."""
+    if config.daemon.harvest_allow_ollama:
+        return config
+
+    backends = [backend for backend in _configured_backends(config) if backend != "ollama"]
+    if backends == _configured_backends(config):
+        return config
+
+    return dataclasses.replace(
+        config,
+        llm_backends=backends,
+        llm_backend=backends[0] if backends else "none",
+        fallback_backend=backends[1] if len(backends) > 1 else "none",
+    )
+
+
 def _harvest_chunk_summary(config: Config) -> str:
     backends = _configured_backends(config)
     unique = []
@@ -485,6 +502,9 @@ def _harvest_all(
     global_memory: Path,
 ) -> int:
     """Sweep all projects under ~/.claude/projects/ and harvest unprocessed sessions."""
+    import time
+
+    started_at = time.monotonic()
     projects_dir_str = getattr(config, "daemon", None) and config.daemon.harvest_projects_dir
     projects_dir = (
         Path(projects_dir_str).expanduser()
@@ -522,6 +542,12 @@ def _harvest_all(
     if args.model:
         config = dataclasses.replace(config, model=args.model)
 
+    if args.auto:
+        max_sessions = config.daemon.harvest_max_sessions_per_run
+        if max_sessions > 0 and len(new_sessions) > max_sessions:
+            new_sessions = new_sessions[:max_sessions]
+        config = _scheduled_harvest_config(config)
+
     current_memory = load_or_init_memory(global_memory)
     archive_path = memory_root / "MEMORY_ARCHIVE.md"
     current_cold = load_or_init_archive(archive_path)
@@ -531,6 +557,12 @@ def _harvest_all(
     _first_call = True
 
     for session_path in new_sessions:
+        if args.auto:
+            max_runtime = config.daemon.harvest_max_runtime_seconds
+            elapsed = time.monotonic() - started_at
+            if max_runtime > 0 and elapsed >= max_runtime:
+                break
+
         transcript, msg_count = read_session_transcript(session_path)
 
         if not transcript.strip():
@@ -541,7 +573,6 @@ def _harvest_all(
             print(f"  Harvesting {session_path.stem}...", end=" ", flush=True)
 
         if not _first_call:
-            import time
             time.sleep(config.chunk_inter_call_sleep)
         _first_call = False
 

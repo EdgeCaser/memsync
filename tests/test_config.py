@@ -48,6 +48,12 @@ class TestConfigDefaults:
         assert c.harvest_chunk_tokens_claude_code == 8000
         assert c.harvest_chunk_tokens_ollama == 2500
 
+    def test_default_daemon_harvest_limits(self):
+        c = Config()
+        assert c.daemon.harvest_allow_ollama is False
+        assert c.daemon.harvest_max_runtime_seconds == 1800
+        assert c.daemon.harvest_max_sessions_per_run == 25
+
 
 class TestConfigPath:
     def test_windows_path_uses_appdata(self, monkeypatch):
@@ -155,6 +161,18 @@ class TestConfigRoundTrip:
         assert loaded.harvest_chunk_tokens_codex == 12000
         assert loaded.harvest_chunk_tokens_ollama == 1800
 
+    def test_load_daemon_harvest_limits(self):
+        loaded = Config._from_dict({
+            "daemon": {
+                "harvest_allow_ollama": True,
+                "harvest_max_runtime_seconds": 900,
+                "harvest_max_sessions_per_run": 3,
+            }
+        })
+        assert loaded.daemon.harvest_allow_ollama is True
+        assert loaded.daemon.harvest_max_runtime_seconds == 900
+        assert loaded.daemon.harvest_max_sessions_per_run == 3
+
     def test_toml_output_is_valid(self):
         import tomllib
         c = Config(
@@ -168,6 +186,8 @@ class TestConfigRoundTrip:
         assert parsed["backups"]["keep_days"] == 14
         assert parsed["paths"]["project_cwd"] == "/usr/local/projects/my_code"
         assert parsed["llm"]["harvest_chunk_tokens_ollama"] == c.harvest_chunk_tokens_ollama
+        assert parsed["daemon"]["harvest_allow_ollama"] is False
+        assert parsed["daemon"]["harvest_max_runtime_seconds"] == 1800
 
     def test_sync_root_serialized_with_forward_slashes(self, tmp_path):
         c = Config(sync_root=tmp_path / "my sync" / "folder")
