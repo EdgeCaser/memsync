@@ -61,6 +61,26 @@ def harvest_chunk_tokens_for_backend(config: "Config", name: str) -> int:
     return specific if specific > 0 else config.harvest_chunk_tokens
 
 
+def instruction_targets(config: "Config") -> list[tuple[str, Path]]:
+    """Return configured instruction targets for supported agents."""
+    targets = [
+        ("CLAUDE.md", config.claude_md_target),
+        ("AGENTS.md", config.codex_agents_target),
+    ]
+    deduped: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for label, path in targets:
+        if path is None:
+            continue
+        expanded = path.expanduser()
+        key = str(expanded).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((label, expanded))
+    return deduped
+
+
 @dataclass
 class DaemonConfig:
     """
@@ -149,6 +169,7 @@ class Config:
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
     claude_md_target: Path = None           # set in __post_init__
+    codex_agents_target: Path = None        # set in __post_init__
     project_cwd: Path | None = None         # Optional: working directory for Claude
 
     # [backups]
@@ -160,6 +181,8 @@ class Config:
     def __post_init__(self) -> None:
         if self.claude_md_target is None:
             self.claude_md_target = Path("~/.claude/CLAUDE.md").expanduser()
+        if self.codex_agents_target is None:
+            self.codex_agents_target = Path("~/AGENTS.md").expanduser()
 
     @classmethod
     def load(cls) -> Config:
@@ -179,6 +202,7 @@ class Config:
 
         sync_root = paths.get("sync_root")
         claude_md_target_str = paths.get("claude_md_target")
+        codex_agents_target_str = paths.get("codex_agents_target")
         project_cwd_str = paths.get("project_cwd") # Add this line
 
         # Daemon section — only present if user has run 'memsync daemon install'
@@ -274,6 +298,10 @@ class Config:
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
             ),
+            codex_agents_target=(
+                Path(codex_agents_target_str).expanduser()
+                if codex_agents_target_str else None
+            ),
             project_cwd=( # Add this block
                 Path(project_cwd_str).expanduser() if project_cwd_str else None
             ),
@@ -311,6 +339,7 @@ class Config:
             "",
             "[paths]",
             f'claude_md_target = "{self.claude_md_target.as_posix()}"',
+            f'codex_agents_target = "{self.codex_agents_target.as_posix()}"',
         ]
         if self.sync_root:
             # TOML strings need forward slashes

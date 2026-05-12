@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import platform
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 
 
@@ -53,3 +54,15 @@ def is_synced(memory_path: Path, target_path: Path) -> bool:
         return target_path.read_bytes() == memory_path.read_bytes()
     except OSError:
         return False
+
+
+def sync_many(memory_path: Path, target_paths: Iterable[Path]) -> None:
+    """Sync one memory file into multiple instruction targets."""
+    seen: set[str] = set()
+    for target_path in target_paths:
+        expanded = Path(target_path).expanduser()
+        key = str(expanded).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        sync(memory_path, expanded)

@@ -25,7 +25,7 @@ that system, it does not replace any of it.
 | Backup mirror | rsync of `.claude-memory/` to a local path hourly — independent of OneDrive |
 | Web UI | Browser-based view/edit of `GLOBAL_MEMORY.md` on the local network |
 | Capture endpoint | REST endpoint for mobile notes (iPhone Shortcuts, etc.) |
-| Drift detection | Alerts when `CLAUDE.md` on any machine is stale vs `GLOBAL_MEMORY.md` |
+| Drift detection | Alerts when any instruction target on any machine is stale vs `GLOBAL_MEMORY.md` |
 | Weekly digest | Email summary of the week's session logs and memory changes |
 
 All features are individually toggleable in config. None are on by default except
@@ -46,6 +46,9 @@ memsync/daemon/
 ├── service.py           # systemd (Pi/Linux) and launchd (Mac) service install
 └── notify.py            # notification abstraction (email, file flag, log)
 ```
+
+In the current implementation, drift detection covers all configured
+instruction targets, not just `CLAUDE.md`.
 
 ---
 
@@ -166,7 +169,7 @@ def build_scheduler(config: Config, blocking: bool = False):
             hours=config.daemon.drift_check_interval_hours,
             args=[config],
             id="drift_check",
-            name="CLAUDE.md drift check",
+            name="Instruction target drift check",
         )
 
     if config.daemon.digest_enabled:
@@ -241,7 +244,7 @@ def job_backup_mirror(config: Config) -> None:
 
 
 def job_drift_check(config: Config) -> None:
-    """Check if CLAUDE.md is stale relative to GLOBAL_MEMORY.md."""
+    """Check if any instruction target is stale relative to GLOBAL_MEMORY.md."""
     from memsync.claude_md import is_synced
     from memsync.providers import get_provider
     from memsync.daemon.notify import notify
@@ -273,6 +276,10 @@ def job_weekly_digest(config: Config) -> None:
 ```
 
 ---
+
+Current code now uses the shared instruction-target helpers for refresh, web
+saves, and drift checks, so `GLOBAL_MEMORY.md` fans out to both `CLAUDE.md`
+and `AGENTS.md` when configured.
 
 ## web.py
 

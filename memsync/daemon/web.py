@@ -15,8 +15,8 @@ from pathlib import Path
 from flask import Flask, redirect, render_template_string, request
 
 from memsync.backups import backup
-from memsync.claude_md import sync as sync_claude_md
-from memsync.config import Config
+from memsync.claude_md import sync_many
+from memsync.config import Config, instruction_targets
 
 # Inline template — no separate template files needed for this simple UI
 TEMPLATE = """
@@ -91,7 +91,7 @@ def create_app(config: Config) -> Flask:
             if path.exists():
                 backup(path, path.parent / "backups")
             path.write_text(new_content, encoding="utf-8")
-            sync_claude_md(path, config.claude_md_target)
+            sync_many(path, [target for _, target in instruction_targets(config)])
             return redirect("/?message=Saved+successfully&cls=saved")
         except Exception as e:
             return redirect(f"/?message=Error:+{e}&cls=error")

@@ -5,7 +5,7 @@ Five jobs:
   nightly_refresh   — reads today's session log and calls the Claude API
   nightly_harvest   — sweeps ~/.claude/projects/ and extracts memories from session transcripts
   backup_mirror     — copies .claude-memory/ to a local mirror path hourly
-  drift_check       — checks whether CLAUDE.md is in sync with GLOBAL_MEMORY.md
+  drift_check       — checks whether instruction targets are in sync with GLOBAL_MEMORY.md
   weekly_digest     — generates and emails a weekly summary
 
 All jobs return early gracefully when filesystem state is missing rather than
@@ -98,7 +98,7 @@ def build_scheduler(
             hours=config.daemon.drift_check_interval_hours,
             args=[config],
             id="drift_check",
-            name="CLAUDE.md drift check",
+            name="Instruction target drift check",
         )
 
     if config.daemon.digest_enabled:
@@ -122,7 +122,8 @@ def job_nightly_refresh(config: Config) -> None:
     from datetime import date
 
     from memsync.backups import backup
-    from memsync.claude_md import sync as sync_claude_md
+    from memsync.claude_md import sync_many
+    from memsync.config import instruction_targets
     from memsync.providers import get_provider
     from memsync.sync import load_or_init_archive, refresh_memory_content
 
@@ -160,7 +161,7 @@ def job_nightly_refresh(config: Config) -> None:
         if result["changed"]:
             backup(memory_path, memory_root / "backups")
             memory_path.write_text(result["updated_content"], encoding="utf-8")
-            sync_claude_md(memory_path, config.claude_md_target)
+            sync_many(memory_path, [path for _, path in instruction_targets(config)])
             if result.get("changed_cold") and result.get("updated_cold"):
                 if archive_path.exists():
                     backup(archive_path, memory_root / "backups")
@@ -197,7 +198,8 @@ def job_nightly_harvest(config: Config) -> None:
     Never raises — a crash here would take down the whole scheduler.
     """
     from memsync.backups import backup
-    from memsync.claude_md import sync as sync_claude_md
+    from memsync.claude_md import sync_many
+    from memsync.config import instruction_targets
     from memsync.harvest import (
         list_sessions,
         load_harvested_index,
@@ -320,7 +322,7 @@ def job_nightly_harvest(config: Config) -> None:
         if changed_any:
             backup(memory_path, memory_root / "backups")
             memory_path.write_text(current_memory, encoding="utf-8")
-            sync_claude_md(memory_path, config.claude_md_target)
+            sync_many(memory_path, [path for _, path in instruction_targets(config)])
             if changed_cold_any:
                 if archive_path.exists():
                     backup(archive_path, memory_root / "backups")
@@ -386,11 +388,12 @@ def job_backup_mirror(config: Config) -> None:
 
 def job_drift_check(config: Config) -> None:
     """
-    Check if CLAUDE.md is stale relative to GLOBAL_MEMORY.md.
+    Check if any instruction target is stale relative to GLOBAL_MEMORY.md.
     Fires a notification via the configured channel if out of sync.
     Never raises.
     """
     from memsync.claude_md import is_synced
+    from memsync.config import instruction_targets
     from memsync.daemon.notify import notify
     from memsync.providers import get_provider
 
@@ -406,19 +409,27 @@ def job_drift_check(config: Config) -> None:
         if not memory_path.exists():
             return
 
-        if not is_synced(memory_path, config.claude_md_target):
+        stale = [
+            (label, path)
+            for label, path in instruction_targets(config)
+            if not is_synced(memory_path, path)
+        ]
+        if stale:
+            lines = [
+                f"{label} at {path} does not match GLOBAL_MEMORY.md at {memory_path}."
+                for label, path in stale
+            ]
             notify(
                 config,
-                subject="memsync: CLAUDE.md is out of sync",
-                body=(
-                    f"CLAUDE.md at {config.claude_md_target} does not match "
-                    f"GLOBAL_MEMORY.md at {memory_path}.\n"
-                    "Run: memsync refresh to resync."
-                ),
+                subject="memsync: instruction target is out of sync",
+                body="\n".join(lines) + "\nRun: memsync refresh to resync.",
             )
-            logger.warning("drift_check: CLAUDE.md is out of sync")
+            logger.warning(
+                "drift_check: out of sync targets: %s",
+                ", ".join(label for label, _ in stale),
+            )
         else:
-            logger.debug("drift_check: CLAUDE.md is in sync")
+            logger.debug("drift_check: all instruction targets are in sync")
 
     except Exception:
         logger.exception("drift_check: unexpected error")

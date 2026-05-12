@@ -37,9 +37,14 @@ max_memory_lines = 400                    # soft cap passed to the refresh promp
 # a non-standard Claude Code install.
 claude_md_target = "~/.claude/CLAUDE.md"
 
+# Where to write the AGENTS.md file that Codex reads at session start.
+# Change this if your Codex environment uses a different AGENTS.md path.
+codex_agents_target = "~/AGENTS.md"
+
 # Specifies a project working directory for Claude. When Claude is invoked from
 # an integrated tool (e.g., a Slack bot), it will operate within this directory.
-# This grants Claude access to relevant project files, CLAUDE.md, and Git context.
+# This grants Claude access to relevant project files, synced instruction files,
+# and Git context.
 # project_cwd = "/path/to/your/project"
 
 [backups]
@@ -79,6 +84,7 @@ class Config:
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
     claude_md_target: Path = Path("~/.claude/CLAUDE.md")
+    codex_agents_target: Path = Path("~/AGENTS.md")
     project_cwd: Path | None = None         # Optional: working directory for Claude
 
     # [backups]
@@ -101,6 +107,7 @@ class Config:
 
         sync_root = paths.get("sync_root")
         claude_md_target = paths.get("claude_md_target", "~/.claude/CLAUDE.md")
+        codex_agents_target = paths.get("codex_agents_target", "~/AGENTS.md")
         project_cwd = paths.get("project_cwd")
         return cls(
             provider=core.get("provider", "onedrive"),
@@ -108,6 +115,7 @@ class Config:
             max_memory_lines=core.get("max_memory_lines", 400),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=Path(claude_md_target).expanduser(),
+            codex_agents_target=Path(codex_agents_target).expanduser(),
             project_cwd=Path(project_cwd).expanduser() if project_cwd else None,
             keep_days=backups.get("keep_days", 30),
         )
@@ -131,6 +139,7 @@ class Config:
             "",
             "[paths]",
             f'claude_md_target = "{self.claude_md_target.as_posix()}"',
+            f'codex_agents_target = "{self.codex_agents_target.as_posix()}"',
         ]
         if self.sync_root:
             # TOML strings need forward slashes or escaped backslashes
@@ -228,6 +237,7 @@ memsync config set keep_days 60
 ```
 
 Valid keys for `memsync config set`:
+- `codex_agents_target` â€” path to write AGENTS.md (default: `~/AGENTS.md`)
 - `provider` — must be a registered provider name
 - `model` — any string (validated on first API call with friendly error)
 - `sync_root` — path, must exist
@@ -252,6 +262,10 @@ Valid keys for `memsync config set`:
 - `claude_md_target` defaults to `~/.claude/CLAUDE.md` but is configurable so users
   aren't broken if Claude Code ever changes its config location, or if they have a
   non-standard setup. Always expand `~` via `.expanduser()` before use.
+
+- `codex_agents_target` defaults to `~/AGENTS.md` and should point to the
+  `AGENTS.md` file your Codex environment reads at startup. Always expand `~`
+  via `.expanduser()` before use.
 
 - `tomllib` (stdlib, Python 3.11+) is read-only. Writing is done manually via
   `_to_toml()`. If the config schema grows significantly, add `tomli_w` as a

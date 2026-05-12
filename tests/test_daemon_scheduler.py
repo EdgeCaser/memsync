@@ -46,6 +46,7 @@ def daemon_config(tmp_path: Path) -> Config:
         provider="custom",
         sync_root=sync_root,
         claude_md_target=claude_md,
+        codex_agents_target=tmp_path / "AGENTS.md",
         daemon=DaemonConfig(
             enabled=True,
             refresh_enabled=True,

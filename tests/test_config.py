@@ -35,6 +35,11 @@ class TestConfigDefaults:
         assert c.claude_md_target is not None
         assert c.claude_md_target == Path("~/.claude/CLAUDE.md").expanduser()
 
+    def test_default_codex_agents_target_is_set(self):
+        c = Config()
+        assert c.codex_agents_target is not None
+        assert c.codex_agents_target == Path("~/AGENTS.md").expanduser()
+
     def test_default_project_cwd_is_none(self):
         c = Config()
         assert c.project_cwd is None
@@ -113,6 +118,18 @@ class TestConfigRoundTrip:
 
         loaded = Config.load()
         assert loaded.project_cwd == project_dir
+
+    def test_codex_agents_target_save_and_load(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "memsync.config.get_config_path",
+            lambda: tmp_path / "config.toml",
+        )
+        target = tmp_path / "AGENTS.md"
+        c = Config(codex_agents_target=target)
+        c.save()
+
+        loaded = Config.load()
+        assert loaded.codex_agents_target == target
 
     def test_load_defaults_when_file_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
