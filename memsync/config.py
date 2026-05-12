@@ -6,6 +6,60 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+DEFAULT_LLM_BACKENDS = ["codex", "claude_code", "gemini", "ollama"]
+BACKEND_ALIASES = {
+    "claude": "claude_code",
+}
+DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS = {
+    "codex": 8000,
+    "claude_code": 8000,
+    "gemini": 6000,
+    "gemini_cli": 6000,
+    "ollama": 2500,
+    "anthropic": 8000,
+}
+BACKEND_HARVEST_CHUNK_FIELDS = {
+    "codex": "harvest_chunk_tokens_codex",
+    "claude_code": "harvest_chunk_tokens_claude_code",
+    "gemini": "harvest_chunk_tokens_gemini",
+    "gemini_cli": "harvest_chunk_tokens_gemini_cli",
+    "ollama": "harvest_chunk_tokens_ollama",
+    "anthropic": "harvest_chunk_tokens_anthropic",
+}
+
+
+def normalize_backend_name(name: str) -> str:
+    """Map user-facing backend aliases onto internal backend keys."""
+    return BACKEND_ALIASES.get(name, name)
+
+
+def normalize_backends(names: list[str]) -> list[str]:
+    """Normalize backend aliases, drop duplicates, and skip disabled entries."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if not name or name == "none":
+            continue
+        canonical = normalize_backend_name(name)
+        if canonical in seen:
+            continue
+        normalized.append(canonical)
+        seen.add(canonical)
+    return normalized
+
+
+def harvest_chunk_tokens_for_backend(config: "Config", name: str) -> int:
+    """
+    Return the configured harvest chunk size for one backend.
+
+    Backend-specific overrides take precedence. A zero or negative override falls
+    back to the shared harvest_chunk_tokens value.
+    """
+    canonical = normalize_backend_name(name)
+    field_name = BACKEND_HARVEST_CHUNK_FIELDS.get(canonical)
+    specific = getattr(config, field_name, 0) if field_name else 0
+    return specific if specific > 0 else config.harvest_chunk_tokens
+
 
 @dataclass
 class DaemonConfig:
@@ -66,9 +120,9 @@ class Config:
     api_key: str = ""           # Anthropic API key (legacy); stored in config.toml, not env
 
     # [llm] — backend selection and per-backend settings
-    llm_backends: list = field(default_factory=lambda: ["gemini", "ollama"])
-    llm_backend: str = "gemini"              # legacy; ignored when llm_backends is set
-    fallback_backend: str = "ollama"         # legacy; ignored when llm_backends is set
+    llm_backends: list = field(default_factory=lambda: list(DEFAULT_LLM_BACKENDS))
+    llm_backend: str = DEFAULT_LLM_BACKENDS[0]   # legacy; ignored when llm_backends is set
+    fallback_backend: str = DEFAULT_LLM_BACKENDS[1]  # legacy; ignored when llm_backends is set
     gemini_api_key: str = ""                 # AI Studio key; leave empty to use ADC instead
     gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
     ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
@@ -76,6 +130,12 @@ class Config:
     ollama_timeout: int = 300                # seconds; covers cold-load of mid-sized models
     ollama_num_ctx: int = 8192               # context window; 32K OOMs the 1b on an 8GB Pi
     harvest_chunk_tokens: int = 6000         # split transcripts into chunks this size; 0 = one-shot
+    harvest_chunk_tokens_codex: int = DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["codex"]
+    harvest_chunk_tokens_claude_code: int = DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["claude_code"]
+    harvest_chunk_tokens_gemini: int = DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["gemini"]
+    harvest_chunk_tokens_gemini_cli: int = DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["gemini_cli"]
+    harvest_chunk_tokens_ollama: int = DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["ollama"]
+    harvest_chunk_tokens_anthropic: int = DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["anthropic"]
     chunk_inter_call_sleep: int = 5          # seconds between chunk extract calls; avoids RPM 429s
 
     # [archive] — tiered memory
@@ -152,13 +212,13 @@ class Config:
 
         # Resolve backend chain — new list form takes precedence over legacy keys
         if "backends" in llm_raw:
-            llm_backends = llm_raw["backends"]
+            llm_backends = normalize_backends(llm_raw["backends"])
+        elif "backend" in llm_raw or "fallback_backend" in llm_raw:
+            primary = llm_raw.get("backend", DEFAULT_LLM_BACKENDS[0])
+            fallback = llm_raw.get("fallback_backend", DEFAULT_LLM_BACKENDS[1])
+            llm_backends = normalize_backends([primary, fallback])
         else:
-            primary = llm_raw.get("backend", "gemini")
-            fallback = llm_raw.get("fallback_backend", "ollama")
-            llm_backends = [primary]
-            if fallback and fallback != "none" and fallback != primary:
-                llm_backends.append(fallback)
+            llm_backends = list(DEFAULT_LLM_BACKENDS)
 
         instance = cls(
             provider=core.get("provider", "onedrive"),
@@ -167,7 +227,7 @@ class Config:
             max_tokens=core.get("max_tokens", 16384),
             api_key=core.get("api_key", ""),
             llm_backends=llm_backends,
-            llm_backend=llm_backends[0] if llm_backends else "gemini",
+            llm_backend=llm_backends[0] if llm_backends else DEFAULT_LLM_BACKENDS[0],
             fallback_backend=llm_backends[1] if len(llm_backends) > 1 else "none",
             gemini_api_key=llm_raw.get("gemini_api_key", ""),
             gemini_model=llm_raw.get("gemini_model", "gemini-2.5-flash"),
@@ -176,6 +236,30 @@ class Config:
             ollama_timeout=llm_raw.get("ollama_timeout", 120),
             ollama_num_ctx=llm_raw.get("ollama_num_ctx", 8192),
             harvest_chunk_tokens=llm_raw.get("harvest_chunk_tokens", 6000),
+            harvest_chunk_tokens_codex=llm_raw.get(
+                "harvest_chunk_tokens_codex",
+                DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["codex"],
+            ),
+            harvest_chunk_tokens_claude_code=llm_raw.get(
+                "harvest_chunk_tokens_claude_code",
+                DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["claude_code"],
+            ),
+            harvest_chunk_tokens_gemini=llm_raw.get(
+                "harvest_chunk_tokens_gemini",
+                DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["gemini"],
+            ),
+            harvest_chunk_tokens_gemini_cli=llm_raw.get(
+                "harvest_chunk_tokens_gemini_cli",
+                DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["gemini_cli"],
+            ),
+            harvest_chunk_tokens_ollama=llm_raw.get(
+                "harvest_chunk_tokens_ollama",
+                DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["ollama"],
+            ),
+            harvest_chunk_tokens_anthropic=llm_raw.get(
+                "harvest_chunk_tokens_anthropic",
+                DEFAULT_BACKEND_HARVEST_CHUNK_TOKENS["anthropic"],
+            ),
             chunk_inter_call_sleep=llm_raw.get("chunk_inter_call_sleep", 5),
             max_hot_lines=core.get("max_hot_lines", 100),
             archive_in_harvest=core.get("archive_in_harvest", True),
@@ -204,6 +288,7 @@ class Config:
         tomllib is read-only (stdlib). Schema is simple enough that manual
         serialization avoids needing a tomli_w dependency.
         """
+        llm_backends = normalize_backends(self.llm_backends) or list(DEFAULT_LLM_BACKENDS)
         lines = [
             "[core]",
             f'provider = "{self.provider}"',
@@ -232,13 +317,19 @@ class Config:
             f"keep_days = {self.keep_days}",
             "",
             "[llm]",
-            "backends = [" + ", ".join(f'"{b}"' for b in self.llm_backends) + "]",
+            "backends = [" + ", ".join(f'"{b}"' for b in llm_backends) + "]",
             f'gemini_model = "{self.gemini_model}"',
             f'ollama_base_url = "{self.ollama_base_url}"',
             f'ollama_model = "{self.ollama_model}"',
             f"ollama_timeout = {self.ollama_timeout}",
             f"ollama_num_ctx = {self.ollama_num_ctx}",
             f"harvest_chunk_tokens = {self.harvest_chunk_tokens}",
+            f"harvest_chunk_tokens_codex = {self.harvest_chunk_tokens_codex}",
+            f"harvest_chunk_tokens_claude_code = {self.harvest_chunk_tokens_claude_code}",
+            f"harvest_chunk_tokens_gemini = {self.harvest_chunk_tokens_gemini}",
+            f"harvest_chunk_tokens_gemini_cli = {self.harvest_chunk_tokens_gemini_cli}",
+            f"harvest_chunk_tokens_ollama = {self.harvest_chunk_tokens_ollama}",
+            f"harvest_chunk_tokens_anthropic = {self.harvest_chunk_tokens_anthropic}",
             f"chunk_inter_call_sleep = {self.chunk_inter_call_sleep}",
         ]
         if self.gemini_api_key:

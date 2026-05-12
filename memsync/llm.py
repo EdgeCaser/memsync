@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 
-from memsync.config import Config
+from memsync.config import Config, normalize_backend_name
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ def call_llm(system: str, user: str, prefill: str, config: Config) -> dict:
     """
     Call the LLM with automatic fallback.
 
-    Default chain: Gemini (primary) → Ollama (fallback).
+    Default chain: Codex → Claude Code → Gemini → Ollama.
     Set llm_backend = "anthropic" in config to use the legacy Anthropic path.
 
     Returns a dict with keys:
@@ -28,14 +30,12 @@ def call_llm(system: str, user: str, prefill: str, config: Config) -> dict:
         truncated (bool)    — True if the response hit the token limit
         backend (str)       — which backend actually answered
     """
-    backends = _resolve_backends(config)
+    backends = resolve_backends(config)
     errors: list[str] = []
 
-    for name, fn in backends:
+    for name, _fn in backends:
         try:
-            result = fn(system, user, prefill, config)
-            result["backend"] = name
-            return result
+            return call_llm_with_backend(name, system, user, prefill, config)
         except Exception as e:  # noqa: BLE001
             logger.warning("LLM backend '%s' failed: %s", name, e)
             errors.append(f"{name}: {e}")
@@ -52,10 +52,11 @@ _BACKEND_FNS: dict[str, object] = {}
 _adc_creds = None
 
 
-def _resolve_backends(config: Config) -> list[tuple[str, object]]:
+def resolve_backends(config: Config) -> list[tuple[str, object]]:
     """Return ordered list of (name, callable) backends from config.llm_backends."""
     chain: list[tuple[str, object]] = []
-    for name in config.llm_backends:
+    for raw_name in config.llm_backends:
+        name = normalize_backend_name(raw_name)
         if name not in _BACKEND_FNS:
             logger.warning("Unknown backend '%s' in backends list — skipping", name)
             continue
@@ -65,6 +66,26 @@ def _resolve_backends(config: Config) -> list[tuple[str, object]]:
             f"No valid backends configured. Valid: {', '.join(_BACKEND_FNS)}"
         )
     return chain
+
+
+def call_llm_with_backend(
+    backend: str,
+    system: str,
+    user: str,
+    prefill: str,
+    config: Config,
+) -> dict:
+    """Call one specific LLM backend without consulting the fallback chain."""
+    name = normalize_backend_name(backend)
+    fn = _BACKEND_FNS.get(name)
+    if fn is None:
+        raise LLMError(
+            f"Unknown LLM backend '{name}'. Valid: {', '.join(_BACKEND_FNS)}"
+        )
+
+    result = fn(system, user, prefill, config)
+    result["backend"] = name
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +105,46 @@ def _inject_prefill(system: str, prefill: str) -> str:
         + f"\n\nCRITICAL: Begin your response with exactly this text"
         f" (no preamble, no code fences, no explanation before it):\n{prefill}"
     )
+
+
+def _windows_cli_fallbacks(name: str) -> list[Path]:
+    """Return common Windows install locations for CLIs we invoke."""
+    home = Path.home()
+    appdata = os.environ.get("APPDATA")
+    localappdata = os.environ.get("LOCALAPPDATA")
+
+    candidates: list[Path] = []
+    if name in {"codex", "gemini"} and appdata:
+        candidates.append(Path(appdata) / "npm" / f"{name}.cmd")
+    elif name == "claude":
+        candidates.append(home / ".local" / "bin" / "claude.exe")
+    elif name == "ollama" and localappdata:
+        candidates.append(Path(localappdata) / "Programs" / "Ollama" / "ollama.exe")
+    return candidates
+
+
+def _resolve_cli_path(name: str) -> str | None:
+    """Resolve a CLI from PATH, with Windows fallbacks for non-interactive jobs."""
+    import shutil
+
+    resolved = shutil.which(name)
+    if resolved is not None:
+        return resolved
+
+    if sys.platform != "win32":
+        return None
+
+    for candidate in _windows_cli_fallbacks(name):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _build_cli_command(cli_path: str, *args: str) -> list[str]:
+    """Build a subprocess argv that can invoke direct binaries and .cmd shims."""
+    if sys.platform == "win32" and cli_path.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/c", cli_path, *args]
+    return [cli_path, *args]
 
 
 def _call_gemini(system: str, user: str, prefill: str, config: Config) -> dict:
@@ -150,11 +211,19 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
     # -p with a short string triggers headless mode; full content comes from stdin.
     headless_flag = ["-p", "Process the task from stdin and return only the requested output."]
 
-    if sys.platform == "win32":
-        # On Windows, npm CLI scripts are .cmd files — cmd.exe is required to execute them.
-        cmd = ["cmd.exe", "/c", "gemini", "-m", config.gemini_model, "--yolo"] + headless_flag
-    else:
-        cmd = ["gemini", "-m", config.gemini_model, "--yolo"] + headless_flag
+    cli_path = _resolve_cli_path("gemini")
+    if cli_path is None:
+        raise RuntimeError(
+            "gemini CLI not found. Install with: npm install -g @google/gemini-cli"
+        )
+
+    cmd = _build_cli_command(
+        cli_path,
+        "-m",
+        config.gemini_model,
+        "--yolo",
+        *headless_flag,
+    )
 
     try:
         result = subprocess.run(  # noqa: S603
@@ -164,9 +233,7 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
             timeout=600,
         )
     except FileNotFoundError as e:
-        raise RuntimeError(
-            "gemini CLI not found. Install with: npm install -g @google/gemini-cli"
-        ) from e
+        raise RuntimeError("gemini CLI not found on PATH") from e
 
     if result.returncode != 0:
         stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
@@ -238,11 +305,11 @@ def _ensure_model_loaded(config: Config) -> None:
 
 def _start_ollama_service(config: Config) -> None:
     """Start `ollama serve` as a detached background process, wait for it, then warm up."""
-    import shutil
     import time
     import urllib.request
 
-    if shutil.which("ollama") is None:
+    ollama_path = _resolve_cli_path("ollama")
+    if ollama_path is None:
         raise RuntimeError(
             "Ollama is not reachable and 'ollama' binary not found — "
             "install from https://ollama.com"
@@ -259,7 +326,7 @@ def _start_ollama_service(config: Config) -> None:
         kwargs["start_new_session"] = True
 
     try:
-        subprocess.Popen(["ollama", "serve"], **kwargs)  # noqa: S603
+        subprocess.Popen([ollama_path, "serve"], **kwargs)  # noqa: S603
     except Exception as e:
         raise RuntimeError(f"Failed to start Ollama: {e}") from e
 
@@ -451,21 +518,21 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
     Uses the Max/Pro subscription — no API key or per-token billing.
     Tools are disabled so this is a pure text-completion call.
     """
-    import shutil
-
-    if shutil.which("claude") is None:
+    cli_path = _resolve_cli_path("claude")
+    if cli_path is None:
         raise RuntimeError(
             "claude CLI not found on PATH — install from https://claude.ai/code"
         )
 
     full_prompt = _inject_prefill(system, prefill) + "\n\n" + user
 
-    if sys.platform == "win32":
-        cmd = ["cmd.exe", "/c", "claude", "--print", "--no-session-persistence",
-               "--tools", ""]
-    else:
-        cmd = ["claude", "--print", "--no-session-persistence",
-               "--tools", ""]
+    cmd = _build_cli_command(
+        cli_path,
+        "--print",
+        "--no-session-persistence",
+        "--tools",
+        "",
+    )
 
     try:
         result = subprocess.run(  # noqa: S603
@@ -495,23 +562,31 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
 
     Install with: npm install -g @openai/codex
     """
-    import shutil
-
-    if shutil.which("codex") is None:
+    cli_path = _resolve_cli_path("codex")
+    if cli_path is None:
         raise RuntimeError(
             "codex CLI not found — install with: npm install -g @openai/codex"
         )
 
     full_prompt = _inject_prefill(system, prefill) + "\n\n" + user
 
-    if sys.platform == "win32":
-        cmd = ["cmd.exe", "/c", "codex", "-q", full_prompt]
-    else:
-        cmd = ["codex", "-q", full_prompt]
+    # Use stdin rather than argv so large harvest prompts do not hit Windows
+    # command-line length limits. --skip-git-repo-check keeps scheduled runs
+    # working when they start outside a repository.
+    cmd = _build_cli_command(
+        cli_path,
+        "exec",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--color",
+        "never",
+        "-",
+    )
 
     try:
         result = subprocess.run(  # noqa: S603
             cmd,
+            input=full_prompt.encode("utf-8"),
             capture_output=True,
             timeout=120,
         )
