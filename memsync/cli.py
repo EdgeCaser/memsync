@@ -10,11 +10,12 @@ from pathlib import Path
 
 from memsync import __version__
 from memsync.backups import backup, latest_backup, list_backups, prune
-from memsync.claude_md import sync as sync_claude_md
+from memsync.claude_md import sync_many as sync_instruction_targets
 from memsync.config import (
     Config,
     DEFAULT_LLM_BACKENDS,
     harvest_chunk_tokens_for_backend,
+    instruction_targets,
     get_config_path,
     normalize_backend_name,
     normalize_backends,
@@ -62,6 +63,24 @@ def _configured_backends(config: Config) -> list[str]:
     if legacy_backends:
         return legacy_backends
     return list(DEFAULT_LLM_BACKENDS)
+
+
+def _instruction_targets(config: Config) -> list[tuple[str, Path]]:
+    return instruction_targets(config)
+
+
+def _sync_instruction_targets(memory_path: Path, config: Config) -> None:
+    sync_instruction_targets(memory_path, [path for _, path in _instruction_targets(config)])
+
+
+def _print_instruction_targets(config: Config, prefix: str = "") -> None:
+    for label, target in _instruction_targets(config):
+        if target.is_symlink():
+            print(f"{prefix}{label:<12} {target} → symlink ✓")
+        elif target.exists():
+            print(f"{prefix}{label:<12} {target} ✓ (copy)")
+        else:
+            print(f"{prefix}{label:<12} {target} ✗ (not synced — run memsync init)")
 
 
 def _scheduled_harvest_config(config: Config) -> Config:
@@ -328,18 +347,18 @@ def cmd_init(args: argparse.Namespace, config: Config) -> int:
     )
     new_config.save()
 
-    # Sync to CLAUDE.md
-    sync_claude_md(global_memory, new_config.claude_md_target)
+    # Sync to instruction targets
+    _sync_instruction_targets(global_memory, new_config)
 
     print("memsync initialized.\n")
     print(f"  Provider:    {provider.display_name}")
     print(f"  Sync root:   {sync_root}")
     print(f"  Memory:      {global_memory}")
-    target = new_config.claude_md_target
-    if target.is_symlink():
-        print(f"  CLAUDE.md:   {target} → (symlink)")
-    else:
-        print(f"  CLAUDE.md:   {target}")
+    for label, target in _instruction_targets(new_config):
+        if target.is_symlink():
+            print(f"  {label:<10} {target} → (symlink)")
+        else:
+            print(f"  {label:<10} {target}")
     print()
     print("Next: edit your memory file, then run:")
     print('  memsync refresh --notes "initial setup complete"')
@@ -460,7 +479,7 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     # Backup then write hot layer
     backup_path = backup(global_memory, memory_root / "backups")
     global_memory.write_text(result["updated_content"], encoding="utf-8")
-    sync_claude_md(global_memory, config.claude_md_target)
+    _sync_instruction_targets(global_memory, config)
 
     # Write cold layer if changed — always back up first so cold has the same
     # safety net as hot (cf. 2026-05 archive-collapse incident).
@@ -491,7 +510,8 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     print(f"  Hot:       {global_memory} ({hot_lines} lines)")
     if result.get("changed_cold"):
         print(f"  Cold:      {archive_path} ({cold_lines} lines)")
-    print("  CLAUDE.md synced ✓")
+    for label, _target in _instruction_targets(config):
+        print(f"  {label} synced ✓")
     return 0
 
 
@@ -628,7 +648,7 @@ def _harvest_all(
     if changed_any:
         backup_path = backup(global_memory, memory_root / "backups")
         global_memory.write_text(current_memory, encoding="utf-8")
-        sync_claude_md(global_memory, config.claude_md_target)
+        _sync_instruction_targets(global_memory, config)
         if changed_cold_any:
             if archive_path.exists():
                 backup(archive_path, memory_root / "backups")
@@ -641,7 +661,8 @@ def _harvest_all(
             if changed_cold_any:
                 cold_lines = len(current_cold.splitlines())
                 print(f"  Cold:      {archive_path} ({cold_lines} lines)")
-            print("  CLAUDE.md synced ✓")
+            for label, _target in _instruction_targets(config):
+                print(f"  {label} synced ✓")
     else:
         if not args.auto:
             print("\nNo memory changes.")
@@ -833,7 +854,7 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
 
     backup_path = backup(global_memory, memory_root / "backups")
     global_memory.write_text(result["updated_content"], encoding="utf-8")
-    sync_claude_md(global_memory, config.claude_md_target)
+    _sync_instruction_targets(global_memory, config)
 
     # Back up cold before overwrite — same safety net as hot.
     if result.get("changed_cold") and result.get("updated_cold"):
@@ -862,7 +883,8 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         if result.get("changed_cold"):
             cold_lines = len(result.get("updated_cold", "").splitlines())
             print(f"  Cold:      {archive_path} ({cold_lines} lines)")
-        print("  CLAUDE.md synced ✓")
+        for label, _target in _instruction_targets(config):
+            print(f"  {label} synced ✓")
 
     return 0
 
@@ -1000,13 +1022,13 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
         cold_lines = len(archive_path.read_text(encoding="utf-8").splitlines())
         print(f"Archive (cold):{archive_path} ✓ ({cold_lines} lines)")
 
-    target = config.claude_md_target
-    if target.is_symlink():
-        print(f"CLAUDE.md:     {target} → symlink ✓")
-    elif target.exists():
-        print(f"CLAUDE.md:     {target} ✓ (copy)")
-    else:
-        print(f"CLAUDE.md:     {target} ✗ (not synced — run memsync init)")
+    for label, target in _instruction_targets(config):
+        if target.is_symlink():
+            print(f"{label:<13}{target} → symlink ✓")
+        elif target.exists():
+            print(f"{label:<13}{target} ✓ (copy)")
+        else:
+            print(f"{label:<13}{target} ✗ (not synced — run memsync init)")
 
     backup_dir = memory_root / "backups"
     if backup_dir.exists():
@@ -1075,9 +1097,9 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
         return 0
 
     if total_removed > 0:
-        from memsync.claude_md import sync as sync_claude_md
-        sync_claude_md(global_memory, config.claude_md_target)
-        print("  CLAUDE.md synced ✓")
+        _sync_instruction_targets(global_memory, config)
+        for label, _target in _instruction_targets(config):
+            print(f"  {label} synced ✓")
     return 0
 
 
@@ -1187,12 +1209,11 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
         global_memory = memory_root / "GLOBAL_MEMORY.md"
         checks.append(("GLOBAL_MEMORY.md", global_memory.exists(), str(global_memory)))
 
-        # 6. CLAUDE.md is synced
-        target = config.claude_md_target
         from memsync.claude_md import is_synced
-        synced = global_memory.exists() and is_synced(global_memory, target)
-        detail = f"{target} → {'synced' if synced else 'not synced (run memsync init)'}"
-        checks.append(("CLAUDE.md synced", synced, detail))
+        for label, target in _instruction_targets(config):
+            synced = global_memory.exists() and is_synced(global_memory, target)
+            detail = f"{target} → {'synced' if synced else 'not synced (run memsync init)'}"
+            checks.append((f"{label} synced", synced, detail))
     else:
         checks.append(("Memory directory", False, "cannot resolve — fix provider first"))
 
@@ -1262,7 +1283,8 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
     value = args.value
 
     valid_keys = {
-        "provider", "model", "sync_root", "claude_md_target", "max_memory_lines", "keep_days",
+        "provider", "model", "sync_root", "claude_md_target", "codex_agents_target",
+        "max_memory_lines", "keep_days",
         "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
         "ollama_base_url", "ollama_model", "ollama_timeout", "ollama_num_ctx",
         "harvest_chunk_tokens",
@@ -1303,6 +1325,9 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "claude_md_target":
         config = dataclasses.replace(config, claude_md_target=Path(value).expanduser())
+
+    elif key == "codex_agents_target":
+        config = dataclasses.replace(config, codex_agents_target=Path(value).expanduser())
 
     elif key == "max_memory_lines":
         if not value.isdigit():

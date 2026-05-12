@@ -259,7 +259,7 @@ class TestCmdInit:
         sync_dir.mkdir()
 
         monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
-        monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, dst: None)
+        monkeypatch.setattr("memsync.cli._sync_instruction_targets", lambda src, dst: None)
 
         result = cmd_init(self._init_args(sync_root=str(sync_dir)), config)
         assert result == 0
@@ -274,7 +274,7 @@ class TestCmdInit:
         sync_dir.mkdir()
 
         monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
-        monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, dst: None)
+        monkeypatch.setattr("memsync.cli._sync_instruction_targets", lambda src, dst: None)
         cmd_init(self._init_args(sync_root=str(sync_dir)), config)
 
         assert (sync_dir / ".claude-memory" / "backups").exists()
@@ -287,7 +287,7 @@ class TestCmdInit:
 
         from memsync.providers.onedrive import OneDriveProvider
         monkeypatch.setattr(OneDriveProvider, "detect", lambda self: fake_root)
-        monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, dst: None)
+        monkeypatch.setattr("memsync.cli._sync_instruction_targets", lambda src, dst: None)
 
         result = cmd_init(self._init_args(provider="onedrive"), config)
         assert result == 0
@@ -324,7 +324,7 @@ class TestCmdInit:
         existing = memory_dir / "GLOBAL_MEMORY.md"
         existing.write_text("# Old content", encoding="utf-8")
 
-        monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, dst: None)
+        monkeypatch.setattr("memsync.cli._sync_instruction_targets", lambda src, dst: None)
         cmd_init(self._init_args(sync_root=str(sync_dir), force=True), config)
 
         new_content = existing.read_text(encoding="utf-8")
@@ -341,7 +341,7 @@ class TestCmdInit:
             saved_configs.append(self)
         monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "config.toml")
         monkeypatch.setattr(Config, "save", capture_save)
-        monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, dst: None)
+        monkeypatch.setattr("memsync.cli._sync_instruction_targets", lambda src, dst: None)
 
         cmd_init(self._init_args(sync_root=str(sync_dir)), config)
         assert len(saved_configs) == 1
@@ -529,9 +529,9 @@ class TestCmdDoctor:
         config, tmp_path, global_memory = memory_file
 
         # Sync CLAUDE.md first
-        from memsync.claude_md import sync as sync_claude_md
+        from memsync.claude_md import sync_many
         config.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
-        sync_claude_md(global_memory, config.claude_md_target)
+        sync_many(global_memory, [config.claude_md_target, config.codex_agents_target])
 
         monkeypatch.setattr("memsync.cli.get_config_path",
                             lambda: tmp_path / "config.toml")
@@ -1323,6 +1323,14 @@ class TestCmdConfigSetExtras:
         assert result == 0
         assert saved[0].claude_md_target == Path("/custom/path")
 
+    def test_set_codex_agents_target(self, tmp_config, monkeypatch):
+        config, tmp_path = tmp_config
+        saved = []
+        monkeypatch.setattr(Config, "save", lambda self: saved.append(self))
+        result = cmd_config_set(self._set_args("codex_agents_target", "/custom/agents"), config)
+        assert result == 0
+        assert saved[0].codex_agents_target == Path("/custom/agents")
+
     def test_set_api_key(self, tmp_config, monkeypatch):
         config, tmp_path = tmp_config
         saved = []
@@ -1375,9 +1383,9 @@ class TestCmdDoctorExtras:
         (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
         monkeypatch.setattr("memsync.cli._PID_FILE", tmp_path / "nonexistent.pid")
 
-        from memsync.claude_md import sync as sync_claude_md
+        from memsync.claude_md import sync_many
         config_with_key.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
-        sync_claude_md(global_memory, config_with_key.claude_md_target)
+        sync_many(global_memory, [config_with_key.claude_md_target, config_with_key.codex_agents_target])
 
         result = cmd_doctor(_args(), config_with_key)
         out = capsys.readouterr().out
@@ -1398,9 +1406,9 @@ class TestCmdDoctorExtras:
             llm_backends=["anthropic"],
         )
 
-        from memsync.claude_md import sync as sync_claude_md
+        from memsync.claude_md import sync_many
         config.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
-        sync_claude_md(global_memory, config.claude_md_target)
+        sync_many(global_memory, [config.claude_md_target, config.codex_agents_target])
 
         cmd_doctor(_args(), config)
         out = capsys.readouterr().out
@@ -1606,7 +1614,7 @@ class TestHarvestAllNonAuto:
         with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=True, content=updated)):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
-                    with patch("memsync.cli.sync_claude_md"):
+                    with patch("memsync.cli._sync_instruction_targets"):
                         result = _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
 
         out = capsys.readouterr().out
@@ -1873,7 +1881,7 @@ class TestCmdInitProviderBranch:
         monkeypatch.setattr("memsync.cli.get_config_path", lambda: tmp_path / "no-config.toml")
         sync_root = tmp_path / "cloud"
         sync_root.mkdir()
-        monkeypatch.setattr("memsync.cli.sync_claude_md", lambda src, tgt: None)
+        monkeypatch.setattr("memsync.cli._sync_instruction_targets", lambda src, tgt: None)
         result = cmd_init(_init_args(sync_root=str(sync_root), provider="nosuchprovider"), config)
         assert result == 0
 

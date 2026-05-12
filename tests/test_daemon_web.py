@@ -29,6 +29,7 @@ def web_config(tmp_path: Path) -> tuple[Config, Path]:
         provider="custom",
         sync_root=sync_root,
         claude_md_target=claude_md,
+        codex_agents_target=tmp_path / "AGENTS.md",
         daemon=DaemonConfig(web_ui_enabled=True, web_ui_port=5000, web_ui_host="127.0.0.1"),
     )
     return config, memory_file
@@ -89,11 +90,12 @@ class TestWebSave:
         location = resp.headers.get("Location", "")
         assert "Saved" in location or "saved" in location.lower()
 
-    def test_save_syncs_to_claude_md(self, web_config: tuple) -> None:
+    def test_save_syncs_to_instruction_targets(self, web_config: tuple) -> None:
         config, _ = web_config
         app = create_app(config)
         new_content = "# Synced Memory\n"
         with app.test_client() as client:
             client.post("/save", data={"content": new_content})
-        # CLAUDE.md should have been written (copy on first run)
+        # Both instruction targets should have been written.
         assert config.claude_md_target.exists()
+        assert config.codex_agents_target.exists()

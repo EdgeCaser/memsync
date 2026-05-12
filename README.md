@@ -4,9 +4,9 @@
 [![GitHub forks](https://img.shields.io/github/forks/ianmiell/memsync?style=social)](https://github.com/ianmiell/memsync/network/members)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Cross-platform global memory manager for Claude Code.
+Cross-platform global memory manager for Claude Code, Codex, and similar AI coding agents.
 
-Claude Code has no memory between sessions. memsync fixes that: it maintains one canonical `GLOBAL_MEMORY.md` in your cloud sync folder, linked to `~/.claude/CLAUDE.md` so Claude Code reads it at every session start.
+Claude Code has no memory between sessions. memsync fixes that: it maintains one canonical `GLOBAL_MEMORY.md` in your cloud sync folder, then syncs it into each agent's startup instruction file such as `~/.claude/CLAUDE.md` and `~/AGENTS.md`.
 
 You can update memory manually with a single command, or install the daemon and let it run in the background — harvesting your session transcripts every night and keeping your memory current without any intervention.
 
@@ -36,7 +36,7 @@ docs/examples/              ← example CLAUDE.md files for different product ty
   CLAUDE.md.api_platform
 ```
 
-Every Claude Code session starts by reading `~/.claude/CLAUDE.md`. memsync keeps it current. See `docs/examples/` for example `CLAUDE.md` files tailored to different product types.
+Claude Code reads `~/.claude/CLAUDE.md`, and Codex can read `~/AGENTS.md`. memsync keeps those instruction targets current from the same source of truth. See `docs/examples/` for example `CLAUDE.md` files tailored to different product types.
 
 Memory is updated two ways:
 - **`memsync harvest`** — reads Claude Code's session transcript directly and extracts what's worth remembering. No notes required from you.
@@ -91,7 +91,7 @@ memsync doctor
 
 | Command | Description |
 |---|---|
-| `memsync init` | First-time setup: create directory structure, sync to CLAUDE.md |
+| `memsync init` | First-time setup: create directory structure, sync instruction targets |
 | `memsync harvest` | Extract memories from a Claude Code session transcript |
 | `memsync refresh --notes "..."` | Merge explicit notes into memory via Claude API |
 | `memsync usage` | Show API usage and estimated cost across all machines |
@@ -145,6 +145,7 @@ memsync config set sync_root /path/to/custom/folder
 memsync config set keep_days 60
 memsync config set max_memory_lines 300
 memsync config set claude_md_target ~/.claude/CLAUDE.md
+memsync config set codex_agents_target ~/AGENTS.md
 ```
 
 ### `memsync usage`
@@ -190,7 +191,7 @@ What runs automatically:
 |---|---|---|
 | Harvest | 2:00am | Reads session transcripts, extracts memories |
 | Refresh | 11:55pm | Merges notes captured via mobile endpoint |
-| Drift check | Every 6h | Alerts if CLAUDE.md is out of sync |
+| Drift check | Every 6h | Alerts if any instruction target is out of sync |
 | Backup mirror | Hourly | Local copy of `.claude-memory/` (opt-in) |
 | Email digest | Monday 9am | Weekly summary of memory changes (opt-in) |
 
@@ -224,7 +225,7 @@ For platform-specific auto-start setup, see [`docs/DAEMON_SETUP.md`](docs/DAEMON
 `memsync` now supports advanced integrations with external tools, such as Slack bots, to provide Claude with enhanced memory and context.
 
 -   **Conversation Continuity**: When integrating Claude into conversational platforms (e.g., Slack threads), `memsync` can now manage Claude's session history. This allows Claude to remember previous turns in a conversation, providing a more continuous and coherent interaction experience.
--   **Project Context (`PROJECT_CWD`)**: You can configure a specific project working directory (`PROJECT_CWD`) for Claude. When Claude is invoked from an integrated tool, it will operate within the context of this specified directory. This ensures Claude has access to relevant project files, `CLAUDE.md`, and Git context, enabling it to provide more accurate and context-aware responses.
+-   **Project Context (`PROJECT_CWD`)**: You can configure a specific project working directory (`PROJECT_CWD`) for Claude. When Claude is invoked from an integrated tool, it will operate within the context of this specified directory. This ensures Claude has access to relevant project files, synced instruction files such as `CLAUDE.md` or `AGENTS.md`, and Git context, enabling it to provide more accurate and context-aware responses.
 
 For detailed setup and configuration of these enhancements, please refer to [`CONFIG.md`](CONFIG.md) for `PROJECT_CWD` settings and [`docs/getting-started.md`](docs/getting-started.md) for integration examples.
 
@@ -241,7 +242,7 @@ For detailed setup and configuration of these enhancements, please refer to [`CO
 
 Detection is automatic. If multiple providers are found during `memsync init`, you'll be prompted to choose.
 
-**Windows note:** Symlinks require admin rights or Developer Mode on Windows. memsync copies `GLOBAL_MEMORY.md` to `~/.claude/CLAUDE.md` instead. The copy is refreshed on every `memsync refresh`.
+**Windows note:** Symlinks require admin rights or Developer Mode on Windows. memsync copies `GLOBAL_MEMORY.md` into instruction targets such as `~/.claude/CLAUDE.md` and `~/AGENTS.md` instead of symlinking when needed.
 
 **iCloud note:** iCloud Drive doesn't sync dot-folders on Mac. memsync stores data in `claude-memory/` (no leading dot) when using the iCloud provider.
 
@@ -266,6 +267,7 @@ api_key = "sk-ant-..."   # stored here, not in environment
 
 [paths]
 claude_md_target = "/Users/ian/.claude/CLAUDE.md"
+codex_agents_target = "/Users/ian/AGENTS.md"
 
 [backups]
 keep_days = 30

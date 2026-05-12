@@ -77,6 +77,9 @@ memsync/harvest.py   memsync/providers/<x>.py  ← resolves sync root path
   - Mac/Linux: create symlink if not already correct, backup any existing file first.
   - Windows: copy (symlinks require admin rights on Windows).
 - `is_synced(memory_path: Path, target_path: Path) -> bool`
+- `sync_many(memory_path: Path, target_paths: Iterable[Path]) -> None`
+  - Syncs one memory file into all configured instruction targets, currently
+    `CLAUDE.md` and `AGENTS.md`.
 
 ---
 
@@ -134,6 +137,9 @@ memsync/harvest.py   memsync/providers/<x>.py  ← resolves sync root path
 
 ---
 
+In current code, every sync step fans out to all configured instruction targets,
+not just `CLAUDE.md`.
+
 ## File layout on disk
 
 ```
@@ -160,9 +166,11 @@ OneDrive/.claude-memory/          ← or iCloud/.claude-memory/, etc.
 
 ---
 
+By default, Codex also gets a synced `~/AGENTS.md` copy of `GLOBAL_MEMORY.md`.
+
 ## What does NOT belong in this tool
 
-- Project-specific memory (that belongs in each project's CLAUDE.md)
+- Project-specific memory (that belongs in each project's CLAUDE.md / AGENTS.md)
 - Cold storage / knowledge bases (use Hipocampus or RAG for that)
 - Multi-user or team memory (out of scope for v1)
 - Anything that requires a server, database, or API key beyond Anthropic's
@@ -200,6 +208,9 @@ That could change. The target path lives in `config.claude_md_target` and
 is never hardcoded anywhere in the logic modules. `cli.py` reads it from
 config and passes it to `claude_md.sync()`. This is already reflected in
 the `claude_md.py` module spec above.
+
+The same principle now applies to `codex_agents_target`, which defaults to
+`~/AGENTS.md` but should remain configurable.
 
 ### 3. Keep the Anthropic SDK version loose
 

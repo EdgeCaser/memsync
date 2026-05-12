@@ -29,6 +29,7 @@ def tmp_config(tmp_path, monkeypatch):
         provider="custom",
         sync_root=sync_root,
         claude_md_target=tmp_path / ".claude" / "CLAUDE.md",
+        codex_agents_target=tmp_path / "AGENTS.md",
     )
 
     monkeypatch.setattr(
