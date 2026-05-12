@@ -48,7 +48,7 @@ def normalize_backends(names: list[str]) -> list[str]:
     return normalized
 
 
-def harvest_chunk_tokens_for_backend(config: "Config", name: str) -> int:
+def harvest_chunk_tokens_for_backend(config: Config, name: str) -> int:
     """
     Return the configured harvest chunk size for one backend.
 
@@ -61,7 +61,7 @@ def harvest_chunk_tokens_for_backend(config: "Config", name: str) -> int:
     return specific if specific > 0 else config.harvest_chunk_tokens
 
 
-def instruction_targets(config: "Config") -> list[tuple[str, Path]]:
+def instruction_targets(config: Config) -> list[tuple[str, Path]]:
     """Return configured instruction targets for supported agents."""
     targets = [
         ("CLAUDE.md", config.claude_md_target),

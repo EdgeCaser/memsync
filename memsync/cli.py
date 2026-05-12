@@ -12,11 +12,11 @@ from memsync import __version__
 from memsync.backups import backup, latest_backup, list_backups, prune
 from memsync.claude_md import sync_many as sync_instruction_targets
 from memsync.config import (
-    Config,
     DEFAULT_LLM_BACKENDS,
+    Config,
+    get_config_path,
     harvest_chunk_tokens_for_backend,
     instruction_targets,
-    get_config_path,
     normalize_backend_name,
     normalize_backends,
 )
@@ -1369,10 +1369,20 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "fallback_backend":
         value = normalize_backend_name(value)
-        if value not in ("codex", "claude_code", "gemini", "gemini_cli", "ollama", "anthropic", "none"):
+        valid_fallback_backends = (
+            "codex",
+            "claude_code",
+            "gemini",
+            "gemini_cli",
+            "ollama",
+            "anthropic",
+            "none",
+        )
+        if value not in valid_fallback_backends:
             print(
                 f"Error: unknown fallback_backend '{value}'.\n"
-                "Valid values: codex, claude, claude_code, gemini, gemini_cli, ollama, anthropic, none",
+                "Valid values: codex, claude, claude_code, gemini, "
+                "gemini_cli, ollama, anthropic, none",
                 file=sys.stderr,
             )
             return 1
@@ -1430,7 +1440,8 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
             return 1
         if ivalue < 0:
             print(
-                f"Error: {key} must be >= 0 (0 = inherit or one-shot for the global key), got {ivalue}.",
+                f"Error: {key} must be >= 0 "
+                f"(0 = inherit or one-shot for the global key), got {ivalue}.",
                 file=sys.stderr,
             )
             return 1

@@ -272,7 +272,8 @@ def job_nightly_harvest(config: Config) -> None:
             elapsed = time.monotonic() - started_at
             if max_runtime > 0 and elapsed >= max_runtime:
                 logger.warning(
-                    "nightly_harvest: stopping after %.0fs runtime budget; remaining sessions will retry next run",
+                    "nightly_harvest: stopping after %.0fs runtime budget; "
+                    "remaining sessions will retry next run",
                     elapsed,
                 )
                 break
@@ -285,7 +286,12 @@ def job_nightly_harvest(config: Config) -> None:
                 continue
 
             try:
-                result = harvest_memory_content(transcript, current_memory, llm_config, current_cold)
+                result = harvest_memory_content(
+                    transcript,
+                    current_memory,
+                    llm_config,
+                    current_cold,
+                )
             except Exception:
                 logger.warning(
                     "nightly_harvest: all backends failed for %s — will retry next run",
