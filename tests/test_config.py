@@ -39,6 +39,15 @@ class TestConfigDefaults:
         c = Config()
         assert c.project_cwd is None
 
+    def test_default_llm_waterfall(self):
+        c = Config()
+        assert c.llm_backends == ["codex", "claude_code", "gemini", "ollama"]
+        assert c.llm_backend == "codex"
+        assert c.fallback_backend == "claude_code"
+        assert c.harvest_chunk_tokens_codex == 8000
+        assert c.harvest_chunk_tokens_claude_code == 8000
+        assert c.harvest_chunk_tokens_ollama == 2500
+
 
 class TestConfigPath:
     def test_windows_path_uses_appdata(self, monkeypatch):
@@ -107,6 +116,45 @@ class TestConfigRoundTrip:
         c = Config.load()
         assert c.provider == "onedrive"
 
+    def test_load_without_llm_section_uses_default_waterfall(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("[core]\nprovider = \"onedrive\"\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "memsync.config.get_config_path",
+            lambda: config_path,
+        )
+        loaded = Config.load()
+        assert loaded.llm_backends == ["codex", "claude_code", "gemini", "ollama"]
+
+    def test_load_normalizes_claude_alias_in_backends(self):
+        loaded = Config._from_dict({
+            "llm": {
+                "backends": ["codex", "claude", "gemini", "ollama"],
+            }
+        })
+        assert loaded.llm_backends == ["codex", "claude_code", "gemini", "ollama"]
+
+    def test_load_legacy_llm_keys_preserves_explicit_order(self):
+        loaded = Config._from_dict({
+            "llm": {
+                "backend": "gemini",
+                "fallback_backend": "ollama",
+            }
+        })
+        assert loaded.llm_backends == ["gemini", "ollama"]
+
+    def test_load_backend_chunk_overrides(self):
+        loaded = Config._from_dict({
+            "llm": {
+                "harvest_chunk_tokens": 6000,
+                "harvest_chunk_tokens_codex": 12000,
+                "harvest_chunk_tokens_ollama": 1800,
+            }
+        })
+        assert loaded.harvest_chunk_tokens == 6000
+        assert loaded.harvest_chunk_tokens_codex == 12000
+        assert loaded.harvest_chunk_tokens_ollama == 1800
+
     def test_toml_output_is_valid(self):
         import tomllib
         c = Config(
@@ -119,6 +167,7 @@ class TestConfigRoundTrip:
         assert parsed["core"]["provider"] == "gdrive"
         assert parsed["backups"]["keep_days"] == 14
         assert parsed["paths"]["project_cwd"] == "/usr/local/projects/my_code"
+        assert parsed["llm"]["harvest_chunk_tokens_ollama"] == c.harvest_chunk_tokens_ollama
 
     def test_sync_root_serialized_with_forward_slashes(self, tmp_path):
         c = Config(sync_root=tmp_path / "my sync" / "folder")

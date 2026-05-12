@@ -473,8 +473,9 @@ class TestMergeCandidatesMalformed:
     def test_malformed_response_sets_malformed_flag(self):
         from memsync.sync import merge_candidates_into_memory
         config = Config()
-        with patch("memsync.sync.call_llm", return_value={
-            "text": "not a memory file", "input_tokens": 5, "output_tokens": 5, "truncated": False,
-        }):
-            result = merge_candidates_into_memory("- fact\n", SAMPLE_MEMORY, config)
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object())]):
+            with patch("memsync.sync.call_llm_with_backend", return_value={
+                "text": "not a memory file", "input_tokens": 5, "output_tokens": 5, "truncated": False,
+            }):
+                result = merge_candidates_into_memory("- fact\n", SAMPLE_MEMORY, config)
         assert result["malformed"] is True

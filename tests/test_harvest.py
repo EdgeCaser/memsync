@@ -469,7 +469,7 @@ class TestChunkedHarvest:
         updated = SAMPLE_MEMORY.replace("- Finish harvest feature", "- Finish harvest feature\n- New item")
         call_count = []
 
-        def fake_llm(system, user, prefill, cfg):
+        def fake_llm(backend, system, user, prefill, cfg):
             call_count.append(system[:20])
             if "scanning" in system.lower():
                 # extract call → return a candidate fact
@@ -477,8 +477,9 @@ class TestChunkedHarvest:
             # merge call → return updated memory
             return {"text": updated, "input_tokens": 10, "output_tokens": 10, "truncated": False}
 
-        with patch("memsync.sync.call_llm", side_effect=fake_llm):
-            result = harvest_memory_content("[USER]\nDid a thing", SAMPLE_MEMORY, config)
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object())]):
+            with patch("memsync.sync.call_llm_with_backend", side_effect=fake_llm):
+                result = harvest_memory_content("[USER]\nDid a thing", SAMPLE_MEMORY, config)
 
         assert len(call_count) == 2
         assert result["changed"] is True
@@ -488,12 +489,13 @@ class TestChunkedHarvest:
         config = Config(harvest_chunk_tokens=6000)
         call_count = []
 
-        def fake_llm(system, user, prefill, cfg):
+        def fake_llm(backend, system, user, prefill, cfg):
             call_count.append(1)
             return {"text": "NONE", "input_tokens": 3, "output_tokens": 1, "truncated": False}
 
-        with patch("memsync.sync.call_llm", side_effect=fake_llm):
-            result = harvest_memory_content("[USER]\nNothing important", SAMPLE_MEMORY, config)
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object())]):
+            with patch("memsync.sync.call_llm_with_backend", side_effect=fake_llm):
+                result = harvest_memory_content("[USER]\nNothing important", SAMPLE_MEMORY, config)
 
         # Only the extract call(s) fired; no merge.
         assert len(call_count) == 1
@@ -504,21 +506,25 @@ class TestChunkedHarvest:
         # Force 3 chunks with a tiny chunk size.
         turns = [f"[USER]\n{'word ' * 50}turn {i}" for i in range(3)]
         transcript = SEPARATOR.join(turns)
-        config = Config(harvest_chunk_tokens=20)  # ~80 chars — each turn forces a new chunk
+        config = Config(
+            harvest_chunk_tokens=20,
+            harvest_chunk_tokens_codex=20,
+        )  # ~80 chars — each turn forces a new chunk
 
         extract_calls = []
         merge_calls = []
         updated = SAMPLE_MEMORY.replace("- Finish harvest feature", "- Finish harvest feature\n- Done")
 
-        def fake_llm(system, user, prefill, cfg):
+        def fake_llm(backend, system, user, prefill, cfg):
             if "scanning" in system.lower():
                 extract_calls.append(1)
                 return {"text": "- Something happened", "input_tokens": 5, "output_tokens": 3, "truncated": False}
             merge_calls.append(1)
             return {"text": updated, "input_tokens": 10, "output_tokens": 10, "truncated": False}
 
-        with patch("memsync.sync.call_llm", side_effect=fake_llm):
-            result = harvest_memory_content(transcript, SAMPLE_MEMORY, config)
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object())]):
+            with patch("memsync.sync.call_llm_with_backend", side_effect=fake_llm):
+                result = harvest_memory_content(transcript, SAMPLE_MEMORY, config)
 
         assert len(extract_calls) == 3
         assert len(merge_calls) == 1
@@ -526,17 +532,90 @@ class TestChunkedHarvest:
         # Token counts accumulate across all calls
         assert result["input_tokens"] == 3 * 5 + 10
 
+    def test_extract_rechunks_for_smaller_fallback_backend(self):
+        turns = [f"[USER]\n{'word ' * 25}turn {i}" for i in range(3)]
+        transcript = SEPARATOR.join(turns)
+        config = Config(
+            harvest_chunk_tokens=100,
+            harvest_chunk_tokens_codex=100,
+            harvest_chunk_tokens_ollama=20,
+            chunk_inter_call_sleep=0,
+        )
+        calls: list[tuple[str, str]] = []
+
+        def fake_call(backend, system, user, prefill, cfg):
+            calls.append((backend, user))
+            if backend == "codex":
+                raise RuntimeError("codex failed")
+            return {
+                "text": "- fact",
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "truncated": False,
+                "backend": backend,
+            }
+
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object()), ("ollama", object())]):
+            with patch("memsync.sync.call_llm_with_backend", side_effect=fake_call):
+                result = extract_candidates_from_chunk(transcript, config)
+
+        ollama_calls = [user for backend, user in calls if backend == "ollama"]
+        assert len(ollama_calls) == 3
+        assert result["backend"] == "ollama"
+        assert result["chunks_processed"] == 3
+
+    def test_merge_batches_for_smaller_fallback_backend(self):
+        config = Config(
+            harvest_chunk_tokens=100,
+            harvest_chunk_tokens_codex=100,
+            harvest_chunk_tokens_ollama=2,
+            chunk_inter_call_sleep=0,
+        )
+        calls: list[str] = []
+
+        def fake_call(backend, system, user, prefill, cfg):
+            calls.append(backend)
+            if backend == "codex":
+                raise RuntimeError("codex failed")
+            if "batch one" in user and "batch two" not in user:
+                text = SAMPLE_MEMORY.replace(
+                    "- Finish harvest feature",
+                    "- Finish harvest feature\n- Added batch one",
+                )
+            else:
+                text = SAMPLE_MEMORY.replace(
+                    "- Finish harvest feature",
+                    "- Finish harvest feature\n- Added batch one\n- Added batch two",
+                )
+            return {
+                "text": text,
+                "input_tokens": 4,
+                "output_tokens": 3,
+                "truncated": False,
+                "backend": backend,
+            }
+
+        candidates = "- batch one\n- batch two\n"
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object()), ("ollama", object())]):
+            with patch("memsync.sync.call_llm_with_backend", side_effect=fake_call):
+                result = merge_candidates_into_memory(candidates, SAMPLE_MEMORY, config)
+
+        assert calls.count("ollama") == 2
+        assert result["backend"] == "ollama"
+        assert "Added batch two" in result["updated_content"]
+
     def test_hard_constraints_enforced_after_merge(self):
         config = Config(harvest_chunk_tokens=6000)
         without_constraint = SAMPLE_MEMORY.replace("- Never rewrite from scratch\n", "")
 
-        def fake_llm(system, user, prefill, cfg):
+        def fake_llm(backend, system, user, prefill, cfg):
             if "scanning" in system.lower():
                 return {"text": "- Some new fact", "input_tokens": 3, "output_tokens": 2, "truncated": False}
             return {"text": without_constraint, "input_tokens": 10, "output_tokens": 10, "truncated": False}
 
-        with patch("memsync.sync.call_llm", side_effect=fake_llm):
-            result = harvest_memory_content("[USER]\nSomething", SAMPLE_MEMORY, config)
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object())]):
+            with patch("memsync.sync.call_llm_with_backend", side_effect=fake_llm):
+                result = harvest_memory_content("[USER]\nSomething", SAMPLE_MEMORY, config)
 
         assert "Never rewrite from scratch" in result["updated_content"]
 
@@ -560,12 +639,13 @@ class TestChunkedHarvest:
         current_cold = "# Archive\n- something done\n"
         captured = []
 
-        def fake_llm(system, user, prefill, cfg):
+        def fake_llm(backend, system, user, prefill, cfg):
             captured.append(user)
             return {"text": SAMPLE_MEMORY, "input_tokens": 5, "output_tokens": 5, "truncated": False}
 
-        with patch("memsync.sync.call_llm", side_effect=fake_llm):
-            merge_candidates_into_memory("- new fact\n", SAMPLE_MEMORY, config, current_cold)
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object())]):
+            with patch("memsync.sync.call_llm_with_backend", side_effect=fake_llm):
+                merge_candidates_into_memory("- new fact\n", SAMPLE_MEMORY, config, current_cold)
 
         assert "COLD ARCHIVE" in captured[0]
         assert "something done" in captured[0]

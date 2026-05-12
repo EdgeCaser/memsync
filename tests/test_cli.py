@@ -84,6 +84,8 @@ class TestCmdStatus:
         assert result == 0
         assert "Platform:" in out
         assert "LLM backend:" in out
+        assert "LLM waterfall:" in out
+        assert "Harvesting:" in out
 
     def test_shows_memory_path(self, memory_file, capsys):
         config, tmp_path, global_memory = memory_file
@@ -530,27 +532,40 @@ class TestCmdDoctor:
         config.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
         sync_claude_md(global_memory, config.claude_md_target)
 
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-abc")
         monkeypatch.setattr("memsync.cli.get_config_path",
                             lambda: tmp_path / "config.toml")
         (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
         monkeypatch.setattr("memsync.cli._PID_FILE", tmp_path / "nonexistent.pid")
+        monkeypatch.setattr(
+            "memsync.cli._check_backend_readiness",
+            lambda backend, _config: (backend == "codex", f"{backend} ready"),
+        )
 
         result = cmd_doctor(_args(), config)
         assert result == 0
 
-    def test_missing_api_key_fails(self, memory_file, monkeypatch, capsys):
+    def test_missing_all_llm_backends_fails(self, memory_file, monkeypatch, capsys):
         config, tmp_path, global_memory = memory_file
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr("memsync.cli.get_config_path",
+                            lambda: tmp_path / "config.toml")
+        (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
+        monkeypatch.setattr("memsync.cli._PID_FILE", tmp_path / "nonexistent.pid")
+        monkeypatch.setattr(
+            "memsync.cli._check_backend_readiness",
+            lambda backend, _config: (False, f"{backend} unavailable"),
+        )
 
         result = cmd_doctor(_args(), config)
         out = capsys.readouterr().out
         assert result == 1
-        assert "API key" in out
+        assert "LLM / waterfall" in out
 
     def test_missing_memory_file_fails(self, tmp_config, monkeypatch, capsys):
         config, tmp_path = tmp_config
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(
+            "memsync.cli._check_backend_readiness",
+            lambda backend, _config: (backend == "codex", f"{backend} ready"),
+        )
         # Memory root exists but no GLOBAL_MEMORY.md
 
         result = cmd_doctor(_args(), config)
@@ -559,12 +574,15 @@ class TestCmdDoctor:
 
     def test_output_includes_all_check_labels(self, memory_file, monkeypatch, capsys):
         config, tmp_path, _ = memory_file
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "memsync.cli._check_backend_readiness",
+            lambda backend, _config: (False, f"{backend} unavailable"),
+        )
 
         cmd_doctor(_args(), config)
         out = capsys.readouterr().out
         assert "Config file" in out
-        assert "API key" in out
+        assert "LLM / waterfall" in out
         assert "Provider" in out
 
 
@@ -1258,6 +1276,22 @@ class TestCmdConfigSetExtras:
         result = cmd_config_set(self._set_args("max_memory_lines", "abc"), config)
         assert result == 1
 
+    def test_set_llm_backend_updates_waterfall(self, tmp_config, monkeypatch):
+        config, tmp_path = tmp_config
+        saved = []
+        monkeypatch.setattr(Config, "save", lambda self: saved.append(self))
+        result = cmd_config_set(self._set_args("llm_backend", "claude"), config)
+        assert result == 0
+        assert saved[0].llm_backends[0] == "claude_code"
+
+    def test_set_backend_specific_harvest_chunk_tokens(self, tmp_config, monkeypatch):
+        config, tmp_path = tmp_config
+        saved = []
+        monkeypatch.setattr(Config, "save", lambda self: saved.append(self))
+        result = cmd_config_set(self._set_args("harvest_chunk_tokens_ollama", "1800"), config)
+        assert result == 0
+        assert saved[0].harvest_chunk_tokens_ollama == 1800
+
 
 # ---------------------------------------------------------------------------
 # cmd_doctor — additional paths
@@ -1268,7 +1302,13 @@ class TestCmdDoctorExtras:
         config, tmp_path, global_memory = memory_file
         # Set API key via config using the Anthropic legacy backend
         import dataclasses
-        config_with_key = dataclasses.replace(config, api_key="sk-ant-test", llm_backend="anthropic")
+        config_with_key = dataclasses.replace(
+            config,
+            api_key="sk-ant-test",
+            llm_backend="anthropic",
+            fallback_backend="none",
+            llm_backends=["anthropic"],
+        )
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.setattr("memsync.cli.get_config_path",
                             lambda: tmp_path / "config.toml")
@@ -1291,7 +1331,12 @@ class TestCmdDoctorExtras:
                             lambda: tmp_path / "config.toml")
         (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
         import dataclasses
-        config = dataclasses.replace(config, llm_backend="anthropic")
+        config = dataclasses.replace(
+            config,
+            llm_backend="anthropic",
+            fallback_backend="none",
+            llm_backends=["anthropic"],
+        )
 
         from memsync.claude_md import sync as sync_claude_md
         config.claude_md_target.parent.mkdir(parents=True, exist_ok=True)

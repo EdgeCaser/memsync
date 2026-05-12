@@ -11,7 +11,14 @@ from pathlib import Path
 from memsync import __version__
 from memsync.backups import backup, latest_backup, list_backups, prune
 from memsync.claude_md import sync as sync_claude_md
-from memsync.config import Config, get_config_path
+from memsync.config import (
+    Config,
+    DEFAULT_LLM_BACKENDS,
+    harvest_chunk_tokens_for_backend,
+    get_config_path,
+    normalize_backend_name,
+    normalize_backends,
+)
 from memsync.harvest import (
     find_latest_session,
     find_project_dir,
@@ -36,6 +43,125 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_BACKEND_DISPLAY_NAMES = {
+    "claude_code": "claude",
+}
+
+
+def _display_backend_name(name: str) -> str:
+    canonical = normalize_backend_name(name)
+    return _BACKEND_DISPLAY_NAMES.get(canonical, canonical)
+
+
+def _configured_backends(config: Config) -> list[str]:
+    backends = normalize_backends(config.llm_backends)
+    if backends:
+        return backends
+    legacy_backends = normalize_backends([config.llm_backend, config.fallback_backend])
+    if legacy_backends:
+        return legacy_backends
+    return list(DEFAULT_LLM_BACKENDS)
+
+
+def _harvest_chunk_summary(config: Config) -> str:
+    backends = _configured_backends(config)
+    unique = []
+    for backend in backends:
+        if backend not in unique:
+            unique.append(backend)
+    if not unique:
+        return str(config.harvest_chunk_tokens)
+    return ", ".join(
+        f"{_display_backend_name(backend)}={harvest_chunk_tokens_for_backend(config, backend)}"
+        for backend in unique
+    )
+
+
+def _find_cli_path(command: str) -> str | None:
+    import shutil
+    import subprocess
+
+    path = shutil.which(command)
+    if path or sys.platform != "win32":
+        return path
+
+    result = subprocess.run(  # noqa: S603
+        ["cmd.exe", "/c", "where", command],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+
+    matches = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return matches[0] if matches else None
+
+
+def _check_backend_readiness(backend: str, config: Config) -> tuple[bool, str]:
+    import os
+
+    backend = normalize_backend_name(backend)
+
+    if backend == "anthropic":
+        if config.api_key:
+            return True, "anthropic â€” API key set via config"
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            return (
+                True,
+                "anthropic â€” API key set via env var"
+                " (consider: memsync config set api_key <key>)",
+            )
+        return False, "anthropic â€” api_key not set; refresh will fail"
+
+    if backend == "codex":
+        path = _find_cli_path("codex")
+        if path:
+            return True, f"codex CLI found at {path}"
+        return False, "codex CLI not found â€” install with: npm install -g @openai/codex"
+
+    if backend == "claude_code":
+        path = _find_cli_path("claude")
+        if path:
+            return True, f"claude CLI found at {path}"
+        return False, "claude CLI not found â€” install from https://claude.ai/code"
+
+    if backend == "gemini":
+        if config.gemini_api_key:
+            return True, f"gemini ({config.gemini_model}) â€” API key configured"
+        try:
+            import google.auth
+
+            google.auth.default(
+                scopes=["https://www.googleapis.com/auth/generative-language"]
+            )
+            return True, f"gemini ({config.gemini_model}) â€” ADC (gcloud credentials)"
+        except Exception as err:  # noqa: BLE001
+            return False, f"gemini â€” no API key and ADC unavailable ({err})"
+
+    if backend == "gemini_cli":
+        path = _find_cli_path("gemini")
+        if path:
+            return True, f"gemini CLI ({config.gemini_model}) â€” found at {path}"
+        return False, "gemini CLI not found â€” install with: npm install -g @google/gemini-cli"
+
+    if backend == "ollama":
+        path = _find_cli_path("ollama")
+        if path:
+            return True, f"ollama CLI found at {path}"
+        return False, "ollama CLI not found â€” install from https://ollama.com"
+
+    return False, f"unknown backend '{backend}'"
+
+
+def _check_llm_waterfall(config: Config) -> tuple[bool, str]:
+    details: list[str] = []
+    for backend in _configured_backends(config):
+        ok, detail = _check_backend_readiness(backend, config)
+        details.append(f"{_display_backend_name(backend)}: {detail}")
+        if ok:
+            return True, detail if len(details) == 1 else "; ".join(details)
+    return False, "; ".join(details) or "no backends configured"
 
 def _resolve_memory_root(config: Config) -> Path | None:
     """
@@ -798,18 +924,20 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     config_marker = "✓" if config_path.exists() else "✗ (not found — run memsync init)"
     print(f"Config:        {config_path} {config_marker}")
     print(f"Provider:      {config.provider}")
-    print(f"LLM backend:   {config.llm_backend}")
-    if config.llm_backend == "gemini":
-        print(f"LLM model:     {config.gemini_model} (fallback: ollama/{config.ollama_model})")
-    elif config.llm_backend == "gemini_cli":
-        print(
-            f"LLM model:     {config.gemini_model} via gemini CLI"
-            f" (fallback: ollama/{config.ollama_model})"
-        )
-    elif config.llm_backend == "ollama":
-        print(f"LLM model:     ollama/{config.ollama_model}")
-    else:
-        print(f"Model:         {config.model}")
+    backends = _configured_backends(config)
+    print(f"LLM backend:   {_display_backend_name(backends[0])}")
+    print(f"LLM waterfall: {' -> '.join(_display_backend_name(name) for name in backends)}")
+    print(f"Harvesting:    chunks {_harvest_chunk_summary(config)}")
+
+    targets: list[str] = []
+    if "anthropic" in backends:
+        targets.append(f"anthropic/{config.model}")
+    if "gemini" in backends or "gemini_cli" in backends:
+        targets.append(f"gemini/{config.gemini_model}")
+    if "ollama" in backends:
+        targets.append(f"ollama/{config.ollama_model}")
+    if targets:
+        print(f"LLM targets:   {', '.join(targets)}")
 
     memory_root = _resolve_memory_root(config)
     if memory_root is None:
@@ -990,73 +1118,15 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
     Self-check: verify the installation is healthy without making any API calls.
     Exits 0 if all checks pass, 1 if any check fails.
     """
-    import os
-
     checks: list[tuple[str, bool, str]] = []  # (label, ok, detail)
 
     # 1. Config file
     config_path = get_config_path()
     checks.append(("Config file", config_path.exists(), str(config_path)))
 
-    # 2. LLM backend / API key check
-    backend = config.llm_backend
-    if backend == "anthropic":
-        api_key_set = bool(config.api_key) or bool(os.environ.get("ANTHROPIC_API_KEY"))
-        if config.api_key:
-            api_key_detail = "anthropic — key set via config"
-        elif os.environ.get("ANTHROPIC_API_KEY"):
-            api_key_detail = (
-                "anthropic — key set via env var (consider: memsync config set api_key <key>)"
-            )
-        else:
-            api_key_detail = "anthropic — api_key not set; refresh will fail"
-        checks.append(("LLM / API key", api_key_set, api_key_detail))
-    elif backend == "gemini":
-        if config.gemini_api_key:
-            detail = f"gemini ({config.gemini_model}) — API key configured"
-            checks.append(("LLM / API key", True, detail))
-        else:
-            # No API key — check if ADC credentials are available
-            try:
-                import google.auth
-                google.auth.default(
-                    scopes=["https://www.googleapis.com/auth/generative-language"]
-                )
-                detail = f"gemini ({config.gemini_model}) — ADC (gcloud credentials)"
-                checks.append(("LLM / API key", True, detail))
-            except Exception as _adc_err:  # noqa: BLE001
-                has_fallback = config.fallback_backend and config.fallback_backend != "none"
-                if has_fallback:
-                    detail = (
-                        f"gemini ADC unavailable; will fall back to {config.fallback_backend} "
-                        f"({_adc_err})"
-                    )
-                    checks.append(("LLM / API key", True, detail))
-                else:
-                    detail = (
-                        "gemini — no API key, ADC failed,"
-                        f" no fallback configured: {_adc_err}"
-                    )
-                    checks.append(("LLM / API key", False, detail))
-    elif backend == "gemini_cli":
-        import shutil
-        import subprocess as _sp
-        cli_path = shutil.which("gemini") or (
-            # Windows: gemini is a .cmd script, use cmd.exe to locate it
-            _sp.run(  # noqa: S603
-                ["cmd.exe", "/c", "where", "gemini"], capture_output=True, text=True
-            ).stdout.strip().splitlines()[0]
-            if sys.platform == "win32" else None
-        )
-        cli_ok = bool(cli_path)
-        detail = (
-            f"gemini CLI ({config.gemini_model}) — found at {cli_path}"
-            if cli_ok
-            else "gemini CLI not found — install with: npm install -g @google/gemini-cli"
-        )
-        checks.append(("LLM / gemini CLI", cli_ok, detail))
-    else:
-        checks.append(("LLM / API key", True, f"{backend} — no API key required"))
+    # 2. LLM waterfall availability
+    llm_ok, llm_detail = _check_llm_waterfall(config)
+    checks.append(("LLM / waterfall", llm_ok, llm_detail))
 
     # 3. Provider / sync root accessible
     if config.sync_root:
@@ -1164,7 +1234,14 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         "provider", "model", "sync_root", "claude_md_target", "max_memory_lines", "keep_days",
         "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
         "ollama_base_url", "ollama_model", "ollama_timeout", "ollama_num_ctx",
-        "harvest_chunk_tokens", "chunk_inter_call_sleep",
+        "harvest_chunk_tokens",
+        "harvest_chunk_tokens_codex",
+        "harvest_chunk_tokens_claude_code",
+        "harvest_chunk_tokens_gemini",
+        "harvest_chunk_tokens_gemini_cli",
+        "harvest_chunk_tokens_ollama",
+        "harvest_chunk_tokens_anthropic",
+        "chunk_inter_call_sleep",
         "max_hot_lines", "archive_in_harvest", "archive_max_lines_in_prompt",
     }
     if key not in valid_keys:
@@ -1215,24 +1292,48 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         config = dataclasses.replace(config, api_key=value)
 
     elif key == "llm_backend":
-        if value not in ("gemini", "gemini_cli", "ollama", "anthropic"):
+        value = normalize_backend_name(value)
+        if value not in ("codex", "claude_code", "gemini", "gemini_cli", "ollama", "anthropic"):
             print(
                 f"Error: unknown llm_backend '{value}'.\n"
-                "Valid values: gemini, gemini_cli, ollama, anthropic",
+                "Valid values: codex, claude, claude_code, gemini, gemini_cli, ollama, anthropic",
                 file=sys.stderr,
             )
             return 1
-        config = dataclasses.replace(config, llm_backend=value)
+        llm_backends = [value] + [
+            backend for backend in _configured_backends(config)
+            if backend != value
+        ]
+        config = dataclasses.replace(
+            config,
+            llm_backend=value,
+            fallback_backend=llm_backends[1] if len(llm_backends) > 1 else "none",
+            llm_backends=llm_backends,
+        )
 
     elif key == "fallback_backend":
-        if value not in ("gemini", "gemini_cli", "ollama", "anthropic", "none"):
+        value = normalize_backend_name(value)
+        if value not in ("codex", "claude_code", "gemini", "gemini_cli", "ollama", "anthropic", "none"):
             print(
                 f"Error: unknown fallback_backend '{value}'.\n"
-                "Valid values: gemini, gemini_cli, ollama, anthropic, none",
+                "Valid values: codex, claude, claude_code, gemini, gemini_cli, ollama, anthropic, none",
                 file=sys.stderr,
             )
             return 1
-        config = dataclasses.replace(config, fallback_backend=value)
+        current = _configured_backends(config)
+        primary = current[0] if current else DEFAULT_LLM_BACKENDS[0]
+        llm_backends = [primary]
+        if value != "none" and value != primary:
+            llm_backends.append(value)
+        llm_backends.extend(
+            backend for backend in current[1:]
+            if backend not in llm_backends
+        )
+        config = dataclasses.replace(
+            config,
+            fallback_backend=llm_backends[1] if len(llm_backends) > 1 else "none",
+            llm_backends=llm_backends,
+        )
 
     elif key == "gemini_api_key":
         config = dataclasses.replace(config, gemini_api_key=value)
@@ -1257,20 +1358,27 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
             return 1
         config = dataclasses.replace(config, **{key: ivalue})
 
-    elif key == "harvest_chunk_tokens":
+    elif key in (
+        "harvest_chunk_tokens",
+        "harvest_chunk_tokens_codex",
+        "harvest_chunk_tokens_claude_code",
+        "harvest_chunk_tokens_gemini",
+        "harvest_chunk_tokens_gemini_cli",
+        "harvest_chunk_tokens_ollama",
+        "harvest_chunk_tokens_anthropic",
+    ):
         try:
             ivalue = int(value)
         except ValueError:
-            print(f"Error: harvest_chunk_tokens must be an integer, got {value!r}.",
-                  file=sys.stderr)
+            print(f"Error: {key} must be an integer, got {value!r}.", file=sys.stderr)
             return 1
         if ivalue < 0:
             print(
-                f"Error: harvest_chunk_tokens must be >= 0 (0 = one-shot mode), got {ivalue}.",
+                f"Error: {key} must be >= 0 (0 = inherit or one-shot for the global key), got {ivalue}.",
                 file=sys.stderr,
             )
             return 1
-        config = dataclasses.replace(config, harvest_chunk_tokens=ivalue)
+        config = dataclasses.replace(config, **{key: ivalue})
 
     elif key == "chunk_inter_call_sleep":
         try:

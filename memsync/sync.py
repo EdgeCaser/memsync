@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
-from memsync.config import Config
-from memsync.llm import call_llm
+from memsync.config import Config, harvest_chunk_tokens_for_backend
+from memsync.llm import LLMError, call_llm, call_llm_with_backend, resolve_backends
+
+logger = logging.getLogger(__name__)
 
 _HOT_DELIMITER = "<!-- memsync:hot -->"
 _COLD_DELIMITER = "<!-- memsync:cold -->"
@@ -293,25 +296,93 @@ def extract_candidates_from_chunk(chunk: str, config: Config) -> dict:
     Returns {"candidates": str, "truncated": bool, "input_tokens": int, "output_tokens": int}.
     candidates is "" if the model found nothing worth persisting.
     """
-    user_prompt = f"TRANSCRIPT SEGMENT:\n{chunk}"
-    llm_result = call_llm(EXTRACT_SYSTEM_PROMPT, user_prompt, "", config)
-    text = llm_result["text"].strip()
-    candidates = "" if not text or text.upper() == "NONE" else text
-    return {
-        "candidates": candidates,
-        "truncated": llm_result["truncated"],
-        "input_tokens": llm_result["input_tokens"],
-        "output_tokens": llm_result["output_tokens"],
-        "backend": llm_result.get("backend", "unknown"),
-    }
+    from memsync.harvest import chunk_transcript
+
+    errors: list[str] = []
+    for backend, _fn in resolve_backends(config):
+        backend_chunks = chunk_transcript(
+            chunk,
+            harvest_chunk_tokens_for_backend(config, backend),
+        )
+        total_input = 0
+        total_output = 0
+        any_truncated = False
+        candidate_blocks: list[str] = []
+
+        try:
+            for i, backend_chunk in enumerate(backend_chunks):
+                if i > 0 and config.chunk_inter_call_sleep > 0:
+                    import time
+                    time.sleep(config.chunk_inter_call_sleep)
+
+                user_prompt = f"TRANSCRIPT SEGMENT:\n{backend_chunk}"
+                llm_result = call_llm_with_backend(
+                    backend,
+                    EXTRACT_SYSTEM_PROMPT,
+                    user_prompt,
+                    "",
+                    config,
+                )
+                total_input += llm_result["input_tokens"]
+                total_output += llm_result["output_tokens"]
+                any_truncated = any_truncated or llm_result["truncated"]
+
+                text = llm_result["text"].strip()
+                if text and text.upper() != "NONE":
+                    candidate_blocks.append(text)
+
+            return {
+                "candidates": "\n".join(candidate_blocks),
+                "truncated": any_truncated,
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+                "backend": backend,
+                "chunks_processed": len(backend_chunks),
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning("LLM backend '%s' failed during extract: %s", backend, e)
+            errors.append(f"{backend}: {e}")
+
+    raise LLMError("All LLM backends failed:\n" + "\n".join(errors))
 
 
-def merge_candidates_into_memory(candidates: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
-    """
-    Merge a bullet list of extracted candidate facts into current_memory via LLM.
-    Returns the same dict shape as harvest_memory_content (without token counts,
-    which the caller accumulates across all extract calls).
-    """
+def _chunk_candidate_facts(candidates: str, max_tokens: int) -> list[str]:
+    """Split candidate facts into line-preserving batches for smaller backends."""
+    if not candidates.strip():
+        return []
+    if max_tokens <= 0:
+        return [candidates]
+
+    max_chars = max_tokens * 4
+    lines = candidates.splitlines()
+    batches: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+
+    for line in lines:
+        added_chars = len(line) + (1 if current else 0)
+        if current and current_chars + added_chars > max_chars:
+            batches.append("\n".join(current).strip())
+            current = [line]
+            current_chars = len(line)
+        else:
+            current.append(line)
+            current_chars += added_chars
+
+    if current:
+        batches.append("\n".join(current).strip())
+
+    return [batch for batch in batches if batch]
+
+
+def _merge_candidates_batch_with_backend(
+    backend: str,
+    candidates: str,
+    current_memory: str,
+    config: Config,
+    current_cold: str = "",
+) -> dict:
+    """Merge one candidate batch using one specific backend."""
     archive_section = ""
     if config.archive_in_harvest and current_cold:
         truncated = _truncate_archive_for_prompt(current_cold, config.archive_max_lines_in_prompt)
@@ -323,7 +394,13 @@ HOT MEMORY (always in context — keep under {config.max_hot_lines} lines):
 CANDIDATE FACTS:
 {candidates}"""
 
-    llm_result = call_llm(MERGE_SYSTEM_PROMPT, user_prompt, _HOT_DELIMITER, config)
+    llm_result = call_llm_with_backend(
+        backend,
+        MERGE_SYSTEM_PROMPT,
+        user_prompt,
+        _HOT_DELIMITER,
+        config,
+    )
     raw = _strip_model_wrapper(llm_result["text"])
     updated_hot, updated_cold = _parse_tiered_response(raw, current_cold)
 
@@ -336,7 +413,7 @@ CANDIDATE FACTS:
             "malformed": True,
             "input_tokens": llm_result["input_tokens"],
             "output_tokens": llm_result["output_tokens"],
-            "backend": llm_result.get("backend", "unknown"),
+            "backend": llm_result.get("backend", backend),
         }
 
     updated_hot = enforce_hard_constraints(current_memory, updated_hot)
@@ -355,16 +432,89 @@ CANDIDATE FACTS:
         "malformed": False,
         "input_tokens": llm_result["input_tokens"],
         "output_tokens": llm_result["output_tokens"],
-        "backend": llm_result.get("backend", "unknown"),
+        "backend": llm_result.get("backend", backend),
     }
+
+
+def merge_candidates_into_memory(candidates: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
+    """
+    Merge a bullet list of extracted candidate facts into current_memory via LLM.
+    Returns the same dict shape as harvest_memory_content (without token counts,
+    which the caller accumulates across all extract calls).
+    """
+    errors: list[str] = []
+    original_hot = current_memory
+    original_cold = current_cold
+
+    for backend, _fn in resolve_backends(config):
+        candidate_batches = _chunk_candidate_facts(
+            candidates,
+            harvest_chunk_tokens_for_backend(config, backend),
+        )
+        next_hot = current_memory
+        next_cold = current_cold
+        total_input = 0
+        total_output = 0
+        any_truncated = False
+
+        try:
+            for i, batch in enumerate(candidate_batches):
+                if i > 0 and config.chunk_inter_call_sleep > 0:
+                    import time
+                    time.sleep(config.chunk_inter_call_sleep)
+
+                result = _merge_candidates_batch_with_backend(
+                    backend,
+                    batch,
+                    next_hot,
+                    config,
+                    next_cold,
+                )
+                total_input += result["input_tokens"]
+                total_output += result["output_tokens"]
+                any_truncated = any_truncated or result["truncated"]
+
+                if result.get("malformed"):
+                    result["input_tokens"] = total_input
+                    result["output_tokens"] = total_output
+                    result["truncated"] = any_truncated
+                    return result
+
+                next_hot = result["updated_content"]
+                next_cold = result.get("updated_cold", next_cold)
+
+            updated_hot = next_hot.strip()
+            updated_cold = next_cold.strip()
+            changed_hot = updated_hot != original_hot.strip()
+            changed_cold = updated_cold != original_cold.strip()
+            return {
+                "updated_content": updated_hot,
+                "updated_cold": updated_cold,
+                "changed": changed_hot or changed_cold,
+                "changed_hot": changed_hot,
+                "changed_cold": changed_cold,
+                "truncated": any_truncated,
+                "malformed": False,
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+                "backend": backend,
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning("LLM backend '%s' failed during merge: %s", backend, e)
+            errors.append(f"{backend}: {e}")
+
+    raise LLMError("All LLM backends failed:\n" + "\n".join(errors))
 
 
 def _harvest_chunked(transcript: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
     """Two-phase chunked harvest: extract candidates per chunk, then one merge call."""
     from memsync.harvest import chunk_transcript
 
-    chunks = chunk_transcript(transcript, config.harvest_chunk_tokens)
-    n_chunks = len(chunks)
+    primary_backend = resolve_backends(config)[0][0]
+    chunks = chunk_transcript(
+        transcript,
+        harvest_chunk_tokens_for_backend(config, primary_backend),
+    )
 
     if not chunks:
         return {
@@ -386,6 +536,7 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config, curre
     any_truncated = False
     candidate_blocks: list[str] = []
     last_backend = "unknown"
+    total_chunks_processed = 0
 
     for i, chunk in enumerate(chunks):
         if i > 0 and config.chunk_inter_call_sleep > 0:
@@ -396,6 +547,7 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config, curre
         total_output += result["output_tokens"]
         any_truncated = any_truncated or result["truncated"]
         last_backend = result.get("backend", last_backend)
+        total_chunks_processed += result.get("chunks_processed", 1)
         if result["candidates"]:
             candidate_blocks.append(result["candidates"])
 
@@ -411,14 +563,14 @@ def _harvest_chunked(transcript: str, current_memory: str, config: Config, curre
             "input_tokens": total_input,
             "output_tokens": total_output,
             "backend": last_backend,
-            "chunks_processed": n_chunks,
+            "chunks_processed": total_chunks_processed,
         }
 
     combined_candidates = "\n".join(candidate_blocks)
     merge_result = merge_candidates_into_memory(combined_candidates, current_memory, config, current_cold)
     merge_result["input_tokens"] += total_input
     merge_result["output_tokens"] += total_output
-    merge_result["chunks_processed"] = n_chunks
+    merge_result["chunks_processed"] = total_chunks_processed
     merge_result["truncated"] = merge_result["truncated"] or any_truncated
     return merge_result
 
