@@ -14,9 +14,11 @@ import pytest
 
 from memsync.config import Config, DaemonConfig
 from memsync.daemon.scheduler import (
+    _daemon_llm_config,
     build_scheduler,
     job_backup_mirror,
     job_drift_check,
+    job_nightly_harvest,
     job_nightly_refresh,
     job_weekly_digest,
 )
@@ -128,6 +130,22 @@ class TestBuildScheduler:
         assert "weekly_digest" in job_ids
 
 
+class TestDaemonLlmConfig:
+    def test_removes_ollama_by_default(self, daemon_config: Config) -> None:
+        cfg = _daemon_llm_config(daemon_config)
+        assert cfg.llm_backends == ["codex", "claude_code", "gemini"]
+        assert cfg.fallback_backend == "claude_code"
+
+    def test_keeps_ollama_when_explicitly_allowed(self, daemon_config: Config) -> None:
+        import dataclasses
+
+        cfg = dataclasses.replace(
+            daemon_config,
+            daemon=dataclasses.replace(daemon_config.daemon, harvest_allow_ollama=True),
+        )
+        assert _daemon_llm_config(cfg).llm_backends == cfg.llm_backends
+
+
 # ---------------------------------------------------------------------------
 # job_nightly_refresh
 # ---------------------------------------------------------------------------
@@ -194,6 +212,80 @@ class TestJobNightlyRefresh:
         """No sync root → early return, no crash."""
         config = Config(provider="custom", sync_root=None)
         job_nightly_refresh(config)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# job_nightly_harvest
+# ---------------------------------------------------------------------------
+
+class TestJobNightlyHarvest:
+    @staticmethod
+    def _write_session(path: Path, text: str) -> None:
+        path.write_text(
+            '{"type":"user","message":{"role":"user","content":"' + text + '"}}\n',
+            encoding="utf-8",
+        )
+
+    def test_limits_sessions_per_run(self, daemon_config: Config, tmp_path: Path) -> None:
+        import dataclasses
+
+        projects = tmp_path / "projects"
+        project = projects / "proj"
+        project.mkdir(parents=True)
+        for i in range(3):
+            self._write_session(project / f"session-{i}.jsonl", f"note {i}")
+
+        cfg = dataclasses.replace(
+            daemon_config,
+            daemon=dataclasses.replace(
+                daemon_config.daemon,
+                harvest_projects_dir=str(projects),
+                harvest_max_sessions_per_run=2,
+            ),
+        )
+        mock_result = {
+            "changed": False,
+            "changed_cold": False,
+            "updated_content": "# Global Memory\n",
+            "truncated": False,
+        }
+
+        with patch("memsync.sync.harvest_memory_content", return_value=mock_result) as mock_harvest:
+            job_nightly_harvest(cfg)
+
+        assert mock_harvest.call_count == 2
+
+    def test_runtime_budget_stops_before_starting_next_session(
+        self, daemon_config: Config, tmp_path: Path
+    ) -> None:
+        import dataclasses
+
+        projects = tmp_path / "projects"
+        project = projects / "proj"
+        project.mkdir(parents=True)
+        self._write_session(project / "a.jsonl", "a")
+        self._write_session(project / "b.jsonl", "b")
+
+        cfg = dataclasses.replace(
+            daemon_config,
+            daemon=dataclasses.replace(
+                daemon_config.daemon,
+                harvest_projects_dir=str(projects),
+                harvest_max_runtime_seconds=10,
+            ),
+        )
+        mock_result = {
+            "changed": False,
+            "changed_cold": False,
+            "updated_content": "# Global Memory\n",
+            "truncated": False,
+        }
+
+        with patch("memsync.daemon.scheduler.time.monotonic", side_effect=[0, 0, 11]):
+            with patch("memsync.sync.harvest_memory_content", return_value=mock_result) as mock_harvest:
+                job_nightly_harvest(cfg)
+
+        assert mock_harvest.call_count == 1
 
 
 # ---------------------------------------------------------------------------

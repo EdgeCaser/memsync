@@ -98,6 +98,9 @@ class DaemonConfig:
     harvest_enabled: bool = True
     harvest_schedule: str = "0 2 * * *"            # 2am daily
     harvest_projects_dir: str = ""                  # empty = ~/.claude/projects (default)
+    harvest_allow_ollama: bool = False              # unattended local LLM work can run hot
+    harvest_max_runtime_seconds: int = 1800          # stop starting new sessions after 30 min
+    harvest_max_sessions_per_run: int = 25           # prevent one backlog from monopolizing host
 
     # Weekly digest email
     digest_enabled: bool = False
@@ -198,6 +201,9 @@ class Config:
             harvest_enabled=daemon_raw.get("harvest_enabled", True),
             harvest_schedule=daemon_raw.get("harvest_schedule", "0 2 * * *"),
             harvest_projects_dir=daemon_raw.get("harvest_projects_dir", ""),
+            harvest_allow_ollama=daemon_raw.get("harvest_allow_ollama", False),
+            harvest_max_runtime_seconds=daemon_raw.get("harvest_max_runtime_seconds", 1800),
+            harvest_max_sessions_per_run=daemon_raw.get("harvest_max_sessions_per_run", 25),
             digest_enabled=daemon_raw.get("digest_enabled", False),
             digest_schedule=daemon_raw.get("digest_schedule", "0 9 * * 1"),
             digest_email_to=daemon_raw.get("digest_email_to", ""),
@@ -358,6 +364,9 @@ class Config:
                 f"harvest_enabled = {str(d.harvest_enabled).lower()}",
                 f'harvest_schedule = "{d.harvest_schedule}"',
                 f'harvest_projects_dir = "{d.harvest_projects_dir}"',
+                f"harvest_allow_ollama = {str(d.harvest_allow_ollama).lower()}",
+                f"harvest_max_runtime_seconds = {d.harvest_max_runtime_seconds}",
+                f"harvest_max_sessions_per_run = {d.harvest_max_sessions_per_run}",
                 f"digest_enabled = {str(d.digest_enabled).lower()}",
                 f'digest_schedule = "{d.digest_schedule}"',
                 f'digest_email_to = "{d.digest_email_to}"',
