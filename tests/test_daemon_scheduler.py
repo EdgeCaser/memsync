@@ -134,8 +134,8 @@ class TestBuildScheduler:
 class TestDaemonLlmConfig:
     def test_removes_ollama_by_default(self, daemon_config: Config) -> None:
         cfg = _daemon_llm_config(daemon_config)
-        assert cfg.llm_backends == ["codex", "claude_code", "gemini"]
-        assert cfg.fallback_backend == "claude_code"
+        assert cfg.llm_backends == ["claude_code", "gemini"]
+        assert cfg.fallback_backend == "gemini"
 
     def test_keeps_ollama_when_explicitly_allowed(self, daemon_config: Config) -> None:
         import dataclasses

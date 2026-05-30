@@ -539,7 +539,7 @@ class TestCmdDoctor:
         monkeypatch.setattr("memsync.cli._PID_FILE", tmp_path / "nonexistent.pid")
         monkeypatch.setattr(
             "memsync.cli._check_backend_readiness",
-            lambda backend, _config: (backend == "codex", f"{backend} ready"),
+            lambda backend, _config: (backend == "claude_code", f"{backend} ready"),
         )
 
         result = cmd_doctor(_args(), config)
@@ -565,7 +565,7 @@ class TestCmdDoctor:
         config, tmp_path = tmp_config
         monkeypatch.setattr(
             "memsync.cli._check_backend_readiness",
-            lambda backend, _config: (backend == "codex", f"{backend} ready"),
+            lambda backend, _config: (backend == "claude_code", f"{backend} ready"),
         )
         # Memory root exists but no GLOBAL_MEMORY.md
 
