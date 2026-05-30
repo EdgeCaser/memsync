@@ -578,6 +578,8 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
     # Use stdin rather than argv so large harvest prompts do not hit Windows
     # command-line length limits. --skip-git-repo-check keeps scheduled runs
     # working when they start outside a repository.
+    # Use low reasoning effort — sufficient for memory-update tasks and
+    # significantly faster than the default medium setting on gpt-5.5.
     cmd = _build_cli_command(
         cli_path,
         "exec",
@@ -585,6 +587,8 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
         "--ephemeral",
         "--color",
         "never",
+        "-c",
+        'model_reasoning_effort="low"',
         "-",
     )
 
