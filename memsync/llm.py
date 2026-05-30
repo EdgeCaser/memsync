@@ -537,6 +537,10 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
         "--no-session-persistence",
         "--tools",
         "",
+        "--model",
+        "haiku",
+        "--effort",
+        "low",
     )
 
     try:
@@ -545,6 +549,7 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
             input=full_prompt.encode("utf-8"),
             capture_output=True,
             timeout=600,
+            cwd="/tmp",  # neutral dir — avoids loading any project CLAUDE.md
         )
     except FileNotFoundError as e:
         raise RuntimeError("claude CLI not found on PATH") from e
