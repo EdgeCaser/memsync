@@ -48,6 +48,7 @@ dev = [
     "pytest-mock>=3.12",
     "ruff>=0.4",
     "bandit[toml]>=1.7",
+    "memsync[anthropic,daemon]",
 ]
 
 [tool.setuptools.packages.find]
