@@ -46,9 +46,9 @@ class TestConfigDefaults:
 
     def test_default_llm_waterfall(self):
         c = Config()
-        assert c.llm_backends == ["codex", "claude_code", "gemini", "ollama"]
-        assert c.llm_backend == "codex"
-        assert c.fallback_backend == "claude_code"
+        assert c.llm_backends == ["claude_code", "gemini", "ollama"]
+        assert c.llm_backend == "claude_code"
+        assert c.fallback_backend == "gemini"
         assert c.harvest_chunk_tokens_codex == 8000
         assert c.harvest_chunk_tokens_claude_code == 8000
         assert c.harvest_chunk_tokens_ollama == 2500
@@ -147,7 +147,7 @@ class TestConfigRoundTrip:
             lambda: config_path,
         )
         loaded = Config.load()
-        assert loaded.llm_backends == ["codex", "claude_code", "gemini", "ollama"]
+        assert loaded.llm_backends == ["claude_code", "gemini", "ollama"]
 
     def test_load_normalizes_claude_alias_in_backends(self):
         loaded = Config._from_dict({

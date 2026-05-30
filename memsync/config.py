@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_LLM_BACKENDS = ["codex", "claude_code", "gemini", "ollama"]
+DEFAULT_LLM_BACKENDS = ["claude_code", "gemini", "ollama"]
 BACKEND_ALIASES = {
     "claude": "claude_code",
 }
