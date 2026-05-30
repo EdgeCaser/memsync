@@ -593,10 +593,12 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
             cmd,
             input=full_prompt.encode("utf-8"),
             capture_output=True,
-            timeout=120,
+            timeout=60,
         )
     except FileNotFoundError as e:
         raise RuntimeError("codex CLI not found on PATH") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("codex CLI timed out after 60 seconds") from e
 
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
