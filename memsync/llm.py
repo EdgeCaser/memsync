@@ -578,13 +578,17 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
     # Use stdin rather than argv so large harvest prompts do not hit Windows
     # command-line length limits. --skip-git-repo-check keeps scheduled runs
     # working when they start outside a repository.
-    # Use low reasoning effort — sufficient for memory-update tasks and
-    # significantly faster than the default medium setting on gpt-5.5.
+    # --ignore-user-config: prevents codex from using its own stored memories,
+    # which can corrupt responses when they contain context from unrelated projects.
+    # Auth still works — codex docs confirm CODEX_HOME is still used for auth.
+    # --ephemeral: no session persistence.
+    # low reasoning effort: sufficient for memory-update tasks, much faster than medium.
     cmd = _build_cli_command(
         cli_path,
         "exec",
         "--skip-git-repo-check",
         "--ephemeral",
+        "--ignore-user-config",
         "--color",
         "never",
         "-c",
@@ -597,12 +601,12 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
             cmd,
             input=full_prompt.encode("utf-8"),
             capture_output=True,
-            timeout=60,
+            timeout=120,
         )
     except FileNotFoundError as e:
         raise RuntimeError("codex CLI not found on PATH") from e
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError("codex CLI timed out after 60 seconds") from e
+        raise RuntimeError("codex CLI timed out after 120 seconds") from e
 
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
