@@ -5,7 +5,48 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from memsync.config import Config
-from memsync.llm import _call_codex, _call_gemini, _call_ollama, _warmup_ollama_model
+from memsync.llm import (
+    _call_claude_code,
+    _call_codex,
+    _call_gemini,
+    _call_ollama,
+    _warmup_ollama_model,
+)
+
+
+class TestClaudeCodeBackend:
+    @staticmethod
+    def _run_with_config(config: Config) -> list:
+        captured: dict = {}
+
+        class Result:
+            returncode = 0
+            stdout = b"ok"
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return Result()
+
+        with patch("memsync.llm._resolve_cli_path", return_value="claude"):
+            with patch("memsync.llm.subprocess.run", side_effect=fake_run):
+                _call_claude_code("SYSTEM", "USER", "", config)
+
+        return captured["cmd"]
+
+    def test_pins_model_and_effort_from_config(self):
+        cmd = self._run_with_config(Config())
+        model_idx = cmd.index("--model")
+        assert cmd[model_idx + 1] == "haiku"
+        effort_idx = cmd.index("--effort")
+        assert cmd[effort_idx + 1] == "low"
+
+    def test_empty_config_inherits_cli_defaults(self):
+        cmd = self._run_with_config(
+            Config(claude_code_model="", claude_code_effort="")
+        )
+        assert "--model" not in cmd
+        assert "--effort" not in cmd
 
 
 class TestCodexBackend:
