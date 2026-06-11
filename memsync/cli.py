@@ -1575,7 +1575,12 @@ def cmd_daemon_start(args: argparse.Namespace, config: Config) -> int:
         ],
     )
 
+    import os as _os
+
     from memsync.daemon.scheduler import build_scheduler
+
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.write_text(str(_os.getpid()), encoding="utf-8")
 
     threads: list[threading.Thread] = []
 
@@ -1607,6 +1612,7 @@ def cmd_daemon_start(args: argparse.Namespace, config: Config) -> int:
             time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
         scheduler.shutdown(wait=False)
+        _PID_FILE.unlink(missing_ok=True)
         print("\nDaemon stopped.")
     return 0
 
@@ -1683,7 +1689,7 @@ def cmd_daemon_status(args: argparse.Namespace, config: Config) -> int:
     print(f"Capture:  {'enabled' if config.daemon.capture_enabled else 'disabled'}"
           f"  (port {config.daemon.capture_port})")
     print(f"Refresh:  {'enabled' if config.daemon.refresh_enabled else 'disabled'}"
-          f"  (schedule: {config.daemon.refresh_schedule})")
+          f"  (schedule: {', '.join(config.daemon.refresh_schedule)})")
     return 0
 
 

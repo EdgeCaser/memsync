@@ -58,16 +58,17 @@ def build_scheduler(
     )
 
     if config.daemon.refresh_enabled:
-        scheduler.add_job(
-            func=job_nightly_refresh,
-            trigger=CronTrigger.from_crontab(config.daemon.refresh_schedule),
-            args=[config],
-            id="nightly_refresh",
-            name="Nightly memory refresh",
-            misfire_grace_time=3600,  # run even if missed by up to 1 hour
-            coalesce=True,
-            max_instances=1,
-        )
+        for i, sched in enumerate(config.daemon.refresh_schedule):
+            scheduler.add_job(
+                func=job_nightly_refresh,
+                trigger=CronTrigger.from_crontab(sched),
+                args=[config],
+                id=f"refresh_{i}",
+                name="Memory refresh",
+                misfire_grace_time=3600,
+                coalesce=True,
+                max_instances=1,
+            )
 
     if config.daemon.harvest_enabled:
         scheduler.add_job(
