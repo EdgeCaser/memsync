@@ -53,6 +53,23 @@ class TestConfigDefaults:
         assert c.harvest_chunk_tokens_claude_code == 8000
         assert c.harvest_chunk_tokens_ollama == 2500
 
+    def test_default_claude_code_model_is_cheap(self):
+        c = Config()
+        assert c.claude_code_model == "haiku"
+        assert c.claude_code_effort == "low"
+
+    def test_claude_code_model_roundtrips_through_toml(self):
+        loaded = Config._from_dict({
+            "llm": {
+                "claude_code_model": "sonnet",
+                "claude_code_effort": "",
+            }
+        })
+        assert loaded.claude_code_model == "sonnet"
+        assert loaded.claude_code_effort == ""
+        toml_text = loaded._to_toml()
+        assert 'claude_code_model = "sonnet"' in toml_text
+
     def test_default_daemon_harvest_limits(self):
         c = Config()
         assert c.daemon.harvest_allow_ollama is False

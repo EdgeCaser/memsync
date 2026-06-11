@@ -146,6 +146,8 @@ class Config:
     llm_backends: list = field(default_factory=lambda: list(DEFAULT_LLM_BACKENDS))
     llm_backend: str = DEFAULT_LLM_BACKENDS[0]   # legacy; ignored when llm_backends is set
     fallback_backend: str = DEFAULT_LLM_BACKENDS[1]  # legacy; ignored when llm_backends is set
+    claude_code_model: str = "haiku"         # alias for `claude --model`; "" = inherit CLI default
+    claude_code_effort: str = "low"          # passed to `claude --effort`; "" = inherit CLI default
     gemini_api_key: str = ""                 # AI Studio key; leave empty to use ADC instead
     gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
     ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
@@ -259,6 +261,8 @@ class Config:
             llm_backends=llm_backends,
             llm_backend=llm_backends[0] if llm_backends else DEFAULT_LLM_BACKENDS[0],
             fallback_backend=llm_backends[1] if len(llm_backends) > 1 else "none",
+            claude_code_model=llm_raw.get("claude_code_model", "haiku"),
+            claude_code_effort=llm_raw.get("claude_code_effort", "low"),
             gemini_api_key=llm_raw.get("gemini_api_key", ""),
             gemini_model=llm_raw.get("gemini_model", "gemini-2.5-flash"),
             ollama_base_url=llm_raw.get("ollama_base_url", "http://localhost:11434/v1"),
@@ -353,6 +357,8 @@ class Config:
             "",
             "[llm]",
             "backends = [" + ", ".join(f'"{b}"' for b in llm_backends) + "]",
+            f'claude_code_model = "{self.claude_code_model}"',
+            f'claude_code_effort = "{self.claude_code_effort}"',
             f'gemini_model = "{self.gemini_model}"',
             f'ollama_base_url = "{self.ollama_base_url}"',
             f'ollama_model = "{self.ollama_model}"',

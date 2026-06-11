@@ -1286,6 +1286,7 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         "provider", "model", "sync_root", "claude_md_target", "codex_agents_target",
         "max_memory_lines", "keep_days",
         "api_key", "llm_backend", "fallback_backend", "gemini_api_key", "gemini_model",
+        "claude_code_model", "claude_code_effort",
         "ollama_base_url", "ollama_model", "ollama_timeout", "ollama_num_ctx",
         "harvest_chunk_tokens",
         "harvest_chunk_tokens_codex",
@@ -1406,6 +1407,12 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
 
     elif key == "gemini_model":
         config = dataclasses.replace(config, gemini_model=value)
+
+    elif key == "claude_code_model":
+        config = dataclasses.replace(config, claude_code_model=value)
+
+    elif key == "claude_code_effort":
+        config = dataclasses.replace(config, claude_code_effort=value)
 
     elif key == "ollama_base_url":
         config = dataclasses.replace(config, ollama_base_url=value)

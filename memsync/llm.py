@@ -516,12 +516,14 @@ def _get_adc_creds():
     return _adc_creds
 
 
-def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> dict:  # noqa: ARG001
+def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> dict:
     """
     Call Claude via the locally installed `claude --print` CLI.
 
     Uses the Max/Pro subscription — no API key or per-token billing.
     Tools are disabled so this is a pure text-completion call.
+    The model is pinned via config (default haiku/low) so merges never
+    inherit an expensive default model from the user's CLI settings.
     """
     cli_path = _resolve_cli_path("claude")
     if cli_path is None:
@@ -531,17 +533,18 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
 
     full_prompt = _inject_prefill(system, prefill) + "\n\n" + user
 
-    cmd = _build_cli_command(
-        cli_path,
+    args = [
         "--print",
         "--no-session-persistence",
         "--tools",
         "",
-        "--model",
-        "haiku",
-        "--effort",
-        "low",
-    )
+    ]
+    if config.claude_code_model:
+        args += ["--model", config.claude_code_model]
+    if config.claude_code_effort:
+        args += ["--effort", config.claude_code_effort]
+
+    cmd = _build_cli_command(cli_path, *args)
 
     try:
         result = subprocess.run(  # noqa: S603
