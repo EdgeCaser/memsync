@@ -77,7 +77,7 @@ class TestBuildScheduler:
     def test_refresh_job_added_when_enabled(self, daemon_config: Config) -> None:
         scheduler = build_scheduler(daemon_config)
         job_ids = [j.id for j in scheduler.get_jobs()]
-        assert "nightly_refresh" in job_ids
+        assert any(jid.startswith("refresh_") for jid in job_ids)
 
     def test_refresh_job_not_added_when_disabled(self, daemon_config: Config) -> None:
         import dataclasses
@@ -88,7 +88,7 @@ class TestBuildScheduler:
         )
         scheduler = build_scheduler(cfg)
         job_ids = [j.id for j in scheduler.get_jobs()]
-        assert "nightly_refresh" not in job_ids
+        assert not any(jid.startswith("refresh_") for jid in job_ids)
 
     def test_backup_mirror_job_added_when_path_set(
         self, daemon_config: Config, tmp_path: Path

@@ -33,6 +33,13 @@ def normalize_backend_name(name: str) -> str:
     return BACKEND_ALIASES.get(name, name)
 
 
+def _coerce_schedule(value: str | list[str]) -> list[str]:
+    """Accept a single cron string or a list; always return a non-empty list."""
+    if isinstance(value, str):
+        return [value]
+    return list(value) if value else ["55 23 * * *"]
+
+
 def normalize_backends(names: list[str]) -> list[str]:
     """Normalize backend aliases, drop duplicates, and skip disabled entries."""
     normalized: list[str] = []
@@ -93,7 +100,11 @@ class DaemonConfig:
 
     # Scheduled refresh — reads today's session log and calls the Claude API
     refresh_enabled: bool = True
-    refresh_schedule: str = "55 23 * * *"      # 11:55pm daily
+    refresh_schedule: list[str] = None  # type: ignore[assignment]  # set in __post_init__
+
+    def __post_init__(self) -> None:
+        if self.refresh_schedule is None:
+            self.refresh_schedule = ["55 23 * * *"]
 
     # Backup mirror — local rsync copy of .claude-memory/ (empty = disabled)
     backup_mirror_path: str = ""
@@ -152,6 +163,7 @@ class Config:
     gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
     ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     ollama_model: str = "llama3.2:3b"        # ~2GB RAM; good balance of quality and Pi headroom
+    codex_timeout: int = 600                 # seconds; codex can be slow on large chunks
     ollama_timeout: int = 300                # seconds; covers cold-load of mid-sized models
     ollama_num_ctx: int = 8192               # context window; 32K OOMs the 1b on an 8GB Pi
     harvest_chunk_tokens: int = 6000         # split transcripts into chunks this size; 0 = one-shot
@@ -212,7 +224,7 @@ class Config:
         daemon = DaemonConfig(
             enabled=daemon_raw.get("enabled", True),
             refresh_enabled=daemon_raw.get("refresh_enabled", True),
-            refresh_schedule=daemon_raw.get("refresh_schedule", "55 23 * * *"),
+            refresh_schedule=_coerce_schedule(daemon_raw.get("refresh_schedule", ["55 23 * * *"])),
             backup_mirror_path=daemon_raw.get("backup_mirror_path", ""),
             backup_mirror_schedule=daemon_raw.get("backup_mirror_schedule", "0 * * * *"),
             web_ui_enabled=daemon_raw.get("web_ui_enabled", True),
@@ -267,6 +279,7 @@ class Config:
             gemini_model=llm_raw.get("gemini_model", "gemini-2.5-flash"),
             ollama_base_url=llm_raw.get("ollama_base_url", "http://localhost:11434/v1"),
             ollama_model=llm_raw.get("ollama_model", "llama3.2:3b"),
+            codex_timeout=llm_raw.get("codex_timeout", 600),
             ollama_timeout=llm_raw.get("ollama_timeout", 120),
             ollama_num_ctx=llm_raw.get("ollama_num_ctx", 8192),
             harvest_chunk_tokens=llm_raw.get("harvest_chunk_tokens", 6000),
@@ -362,6 +375,7 @@ class Config:
             f'gemini_model = "{self.gemini_model}"',
             f'ollama_base_url = "{self.ollama_base_url}"',
             f'ollama_model = "{self.ollama_model}"',
+            f"codex_timeout = {self.codex_timeout}",
             f"ollama_timeout = {self.ollama_timeout}",
             f"ollama_num_ctx = {self.ollama_num_ctx}",
             f"harvest_chunk_tokens = {self.harvest_chunk_tokens}",
@@ -383,7 +397,7 @@ class Config:
             lines += [
                 "[daemon]",
                 f"enabled = {str(d.enabled).lower()}",
-                f'refresh_schedule = "{d.refresh_schedule}"',
+                "refresh_schedule = [" + ", ".join(f'"{s}"' for s in d.refresh_schedule) + "]",
                 f"refresh_enabled = {str(d.refresh_enabled).lower()}",
                 f'backup_mirror_path = "{d.backup_mirror_path}"',
                 f'backup_mirror_schedule = "{d.backup_mirror_schedule}"',

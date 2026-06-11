@@ -610,7 +610,7 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
             cmd,
             input=full_prompt.encode("utf-8"),
             capture_output=True,
-            timeout=120,
+            timeout=config.codex_timeout,
         )
     except FileNotFoundError as e:
         raise RuntimeError("codex CLI not found on PATH") from e
