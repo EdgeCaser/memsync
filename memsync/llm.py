@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -552,7 +553,7 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
             input=full_prompt.encode("utf-8"),
             capture_output=True,
             timeout=600,
-            cwd="/tmp",  # neutral dir — avoids loading any project CLAUDE.md
+            cwd=tempfile.gettempdir(),  # neutral dir — avoids loading any project CLAUDE.md
         )
     except FileNotFoundError as e:
         raise RuntimeError("claude CLI not found on PATH") from e
