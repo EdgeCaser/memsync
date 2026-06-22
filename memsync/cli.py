@@ -574,6 +574,8 @@ def _harvest_all(
     changed_any = False
     changed_cold_any = False
     errors = 0
+    updated_count = 0
+    error_sessions: list[tuple[str, str]] = []
     _first_call = True
 
     for session_path in new_sessions:
@@ -601,6 +603,7 @@ def _harvest_all(
         except LLMError as e:
             print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
             errors += 1
+            error_sessions.append((session_path.stem, f"all backends failed: {str(e)[:120]}"))
             continue  # not marked — will retry on next run
 
         try:
@@ -620,6 +623,7 @@ def _harvest_all(
             if not args.auto:
                 print("malformed response — skipped.")
             errors += 1
+            error_sessions.append((session_path.stem, "malformed response"))
             continue  # not marked — will retry on next run
 
         harvested[session_path.stem] = msg_count
@@ -633,6 +637,7 @@ def _harvest_all(
         if result["changed"]:
             current_memory = result["updated_content"]
             changed_any = True
+            updated_count += 1
             if result.get("changed_cold") and result.get("updated_cold"):
                 current_cold = result["updated_cold"]
                 changed_cold_any = True
@@ -681,7 +686,22 @@ def _harvest_all(
         journal_dir=str(memory_root / "journal"),
     )
 
-    return 1 if errors else 0
+    # In --auto mode the per-session prints above are suppressed, so emit one
+    # summary line when anything notable happened. This gives the scheduled
+    # wrapper (and its Slack notification) a non-empty body to report; a clean
+    # no-change run still prints nothing so quiet nights stay quiet.
+    if args.auto and (changed_any or errors):
+        summary = f"harvest: {len(new_sessions)} session(s), {updated_count} updated"
+        if errors:
+            summary += f", {errors} error(s)"
+        print(summary)
+        for sid, reason in error_sessions:
+            print(f"  - {sid}: {reason}")
+
+    # Exit non-zero only on total failure — a run that errored on some sessions
+    # but still updated memory is a partial success, not a failure. One bad
+    # session out of many should not raise a "harvest FAILED" alarm.
+    return 1 if errors and not changed_any else 0
 
 
 def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
