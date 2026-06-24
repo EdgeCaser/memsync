@@ -122,6 +122,32 @@ or make a real API call. Use `tmp_path` and `unittest.mock.patch` throughout.
 
 For Flask tests, use the Flask test client — never bind to a real port in tests.
 
+---
+
+## 11. Windows: CLI backends flash console windows from the detached daemon
+
+On Windows the daemon runs detached (`DETACHED_PROCESS`), so it has no console
+of its own. Every LLM backend that shells out to a CLI (`claude`, `codex`,
+`gemini`) is a console program — without `CREATE_NO_WINDOW` each
+`subprocess.run` allocates a *fresh* console window and steals focus. A harvest
+cycle makes one such call per session (plus fallbacks), so the user sees a
+window pop up and grab the screen repeatedly on every cycle.
+
+All CLI subprocess calls go through `llm.no_window_kwargs()`, which adds
+`creationflags=CREATE_NO_WINDOW` on Windows and is a no-op everywhere else.
+The constant is Windows-only, so the helper reads it via `getattr(..., 0)` to
+stay safe under tests that patch `sys.platform` to `"win32"` on a POSIX host.
+
+If you add a new CLI-shelling backend, spread `**no_window_kwargs()` into its
+`subprocess.run`. Do not combine it with `DETACHED_PROCESS` (used for the
+long-lived `ollama serve` and the daemon itself) — those flags conflict, and
+`DETACHED_PROCESS` already suppresses the window.
+
+```python
+# Good — no window flash from a background cycle
+subprocess.run(cmd, input=..., capture_output=True, timeout=600, **no_window_kwargs())
+```
+
 ```python
 # Good
 def test_capture_endpoint(tmp_config):

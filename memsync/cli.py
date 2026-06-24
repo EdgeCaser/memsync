@@ -126,6 +126,7 @@ def _find_cli_path(command: str) -> str | None:
         ["cmd.exe", "/c", "where", command],
         capture_output=True,
         text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,  # no console-window flash from background jobs
     )
     if result.returncode != 0:
         return None
@@ -1736,7 +1737,10 @@ def cmd_daemon_status(args: argparse.Namespace, config: Config) -> int:
             if platform.system() == "Windows":
                 import subprocess
                 result = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True
+                    ["tasklist", "/FI", f"PID eq {pid}"],
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,  # no console-window flash
                 )
                 running = str(pid) in result.stdout
             else:
