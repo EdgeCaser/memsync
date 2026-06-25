@@ -1083,8 +1083,8 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
 
     # ── Semantic (LLM) pass ──────────────────────────────────────────────────
     if getattr(args, "semantic", False):
-        from memsync.sync import semantic_dedupe_memory
         from memsync.backups import backup
+        from memsync.sync import semantic_dedupe_memory
 
         print("Running semantic dedupe (LLM pass) on hot layer…")
         original = global_memory.read_text(encoding="utf-8")
@@ -1140,7 +1140,7 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
     total_removed = 0
     for file_path, label in targets:
         original = file_path.read_text(encoding="utf-8")
-        deduped = _deduplicate_memory(original)
+        deduped = _deduplicate_memory(original, fuzzy=True)
         orig_lines = len(original.splitlines())
         dedup_lines = len(deduped.splitlines())
         removed = orig_lines - dedup_lines
@@ -1944,13 +1944,19 @@ def build_parser() -> argparse.ArgumentParser:
     # dedup
     p_dedup = subparsers.add_parser(
         "dedup",
-        help="Remove duplicate bullet lines (fuzzy Python pass by default; --semantic for LLM pass)",
+        help=(
+            "Remove duplicate bullet lines (fuzzy Python pass by default; "
+            "--semantic for LLM pass)"
+        ),
     )
     p_dedup.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
     p_dedup.add_argument(
         "--semantic",
         action="store_true",
-        help="LLM pass: also catches same-policy bullets phrased differently. Shows diff; use --apply to write.",
+        help=(
+            "LLM pass: also catches same-policy bullets phrased differently. "
+            "Shows diff; use --apply to write."
+        ),
     )
     p_dedup.add_argument(
         "--apply",

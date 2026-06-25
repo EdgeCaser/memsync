@@ -435,6 +435,21 @@ class TestDeduplicateMemory:
         result = _deduplicate_memory(text)
         assert result.count("Some prose.") == 2
 
+    def test_default_keeps_near_duplicates(self):
+        # Distinct enumerated facts share a prefix (ratio ~0.87). The auto path is
+        # exact-only, so both must survive — fuzzy collapse here would lose data.
+        text = "## Section\n- Added batch one\n- Added batch two\n"
+        result = _deduplicate_memory(text)
+        assert "Added batch one" in result
+        assert "Added batch two" in result
+
+    def test_fuzzy_opt_in_collapses_near_duplicates(self):
+        text = "## Section\n- Added batch one\n- Added batch two\n"
+        result = _deduplicate_memory(text, fuzzy=True)
+        # Opt-in fuzzy pass treats the two as near-duplicates; first occurrence wins.
+        assert "Added batch one" in result
+        assert "Added batch two" not in result
+
 
 class TestStripLabelPrefix:
     def test_returns_text_unchanged_when_no_markdown_found(self):

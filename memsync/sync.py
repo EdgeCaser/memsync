@@ -231,7 +231,7 @@ RULES:
 Return ONLY the cleaned file content. No preamble, no explanation."""
 
 
-def semantic_dedupe_memory(content: str, config: "Config") -> str:
+def semantic_dedupe_memory(content: str, config: Config) -> str:
     """
     Run an LLM pass over content to find and remove semantic duplicates.
     Returns the cleaned content string. Raises LLMError on failure.
@@ -735,12 +735,17 @@ def _fuzzy_is_duplicate(candidate: str, seen_normalized: list[str], threshold: f
     return False
 
 
-def _deduplicate_memory(content: str) -> str:
+def _deduplicate_memory(content: str, fuzzy: bool = False) -> str:
     """
     Remove duplicate bullet lines within each section. Keeps the first occurrence.
     Resets dedup scope at each heading so the same bullet can appear in different sections.
-    Uses both exact-match and fuzzy matching (SequenceMatcher >= 0.85) to catch
-    near-duplicates with slightly different phrasing.
+
+    Exact-match only by default — safe to run automatically on every harvest.
+    Pass fuzzy=True to also collapse near-duplicates (SequenceMatcher >= 0.85). Fuzzy
+    matching is lossy: on short bullets the shared prefix dominates the ratio, so distinct
+    items differing only in a trailing token ("batch one"/"batch two", "v1"/"v2") can be
+    wrongly merged. It is therefore opt-in and used only by the explicit `memsync dedup`
+    command, which previews a diff before writing.
     """
     lines = content.splitlines()
     seen_exact: set[str] = set()
@@ -757,10 +762,11 @@ def _deduplicate_memory(content: str) -> str:
             key = re.sub(r"^[-*+]\s+", "", stripped.lower()).strip()
             if key in seen_exact:
                 continue
-            if _fuzzy_is_duplicate(key, seen_normalized):
+            if fuzzy and _fuzzy_is_duplicate(key, seen_normalized):
                 continue
             seen_exact.add(key)
-            seen_normalized.append(_normalize_bullet(key))
+            if fuzzy:
+                seen_normalized.append(_normalize_bullet(key))
         result.append(line)
     return "\n".join(result)
 
