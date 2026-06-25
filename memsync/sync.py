@@ -218,6 +218,42 @@ def load_or_init_archive(path: Path) -> str:
     return "<!-- memsync archive -->\n# Memory Archive\n\n## Recent completions\n"
 
 
+SEMANTIC_DEDUPE_PROMPT = """You are cleaning a persistent memory file for an AI assistant. Find and remove semantic duplicates — bullets that express the same policy or fact in different words.
+
+RULES:
+- When two bullets say the same thing, keep the more specific or informative version and remove the other
+- Never remove bullets from a "Hard constraints" section unless they are semantically identical to another bullet in that same section
+- Never change the meaning or wording of any bullet you keep
+- Never merge bullets that express related but distinct policies
+- Preserve all section headings, blank lines, and non-bullet content exactly
+- If you find no semantic duplicates, return the file UNCHANGED
+
+Return ONLY the cleaned file content. No preamble, no explanation."""
+
+
+def semantic_dedupe_memory(content: str, config: "Config") -> str:
+    """
+    Run an LLM pass over content to find and remove semantic duplicates.
+    Returns the cleaned content string. Raises LLMError on failure.
+    Uses the standard backend waterfall (no Anthropic API spend if codex is primary).
+    """
+    from memsync.llm import call_llm
+    result = call_llm(
+        system=SEMANTIC_DEDUPE_PROMPT,
+        user=content,
+        prefill="",
+        config=config,
+    )
+    cleaned = result["text"].strip()
+    # Guard: if the LLM returned something suspiciously short, reject it
+    if len(cleaned) < len(content) * 0.5:
+        raise ValueError(
+            f"Semantic dedupe response too short ({len(cleaned)} chars vs "
+            f"{len(content)} original) — rejecting to avoid data loss."
+        )
+    return cleaned
+
+
 def harvest_memory_content(transcript: str, current_memory: str, config: Config, current_cold: str = "") -> dict:
     """
     Extract memories from a session transcript and merge them into current_memory.

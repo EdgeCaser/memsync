@@ -1064,7 +1064,12 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
-    """Remove duplicate bullet lines from both memory layers without an LLM call."""
+    """Remove duplicate bullet lines from memory layers.
+
+    Default: fuzzy Python pass (free, no LLM).
+    --semantic: LLM pass that also catches same-policy bullets phrased differently.
+                Implies --dry-run unless --apply is also given.
+    """
     from memsync.sync import _deduplicate_memory
 
     memory_root, code = _require_memory_root(config)
@@ -1076,6 +1081,57 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
         print("Error: GLOBAL_MEMORY.md not found. Run 'memsync init' first.", file=sys.stderr)
         return 3
 
+    # ── Semantic (LLM) pass ──────────────────────────────────────────────────
+    if getattr(args, "semantic", False):
+        from memsync.sync import semantic_dedupe_memory
+        from memsync.backups import backup
+
+        print("Running semantic dedupe (LLM pass) on hot layer…")
+        original = global_memory.read_text(encoding="utf-8")
+        try:
+            cleaned = semantic_dedupe_memory(original, config)
+        except Exception as e:  # noqa: BLE001
+            print(f"Error: semantic dedupe failed — {e}", file=sys.stderr)
+            return 1
+
+        diff = difflib.unified_diff(
+            original.splitlines(keepends=True),
+            cleaned.splitlines(keepends=True),
+            fromfile="hot/current",
+            tofile="hot/semantic-deduped",
+        )
+        diff_text = "".join(diff)
+
+        if not diff_text:
+            print("No semantic duplicates found.")
+            return 0
+
+        print(diff_text)
+        apply = getattr(args, "apply", False)
+        if not apply:
+            orig_lines = len(original.splitlines())
+            clean_lines = len(cleaned.splitlines())
+            print(
+                f"\n[DRY RUN] {orig_lines} → {clean_lines} lines "
+                f"({orig_lines - clean_lines} removed). "
+                "Re-run with --semantic --apply to write."
+            )
+            return 0
+
+        backup(global_memory, memory_root / "backups")
+        global_memory.write_text(cleaned, encoding="utf-8")
+        _sync_instruction_targets(global_memory, config)
+        orig_lines = len(original.splitlines())
+        clean_lines = len(cleaned.splitlines())
+        print(
+            f"\nApplied: {orig_lines} → {clean_lines} lines "
+            f"({orig_lines - clean_lines} removed)."
+        )
+        for label, _target in _instruction_targets(config):
+            print(f"  {label} synced ✓")
+        return 0
+
+    # ── Fuzzy Python pass (default) ──────────────────────────────────────────
     targets = [(global_memory, "hot")]
     archive_path = memory_root / "MEMORY_ARCHIVE.md"
     if archive_path.exists():
@@ -1886,8 +1942,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.set_defaults(func=cmd_status)
 
     # dedup
-    p_dedup = subparsers.add_parser("dedup", help="Remove duplicate bullet lines (no LLM call)")
+    p_dedup = subparsers.add_parser(
+        "dedup",
+        help="Remove duplicate bullet lines (fuzzy Python pass by default; --semantic for LLM pass)",
+    )
     p_dedup.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
+    p_dedup.add_argument(
+        "--semantic",
+        action="store_true",
+        help="LLM pass: also catches same-policy bullets phrased differently. Shows diff; use --apply to write.",
+    )
+    p_dedup.add_argument(
+        "--apply",
+        action="store_true",
+        help="With --semantic: write the changes after showing the diff (default is dry-run).",
+    )
     p_dedup.set_defaults(func=cmd_dedup)
 
     # prune
