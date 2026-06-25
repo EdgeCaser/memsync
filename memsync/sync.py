@@ -675,25 +675,56 @@ SESSION NOTES:
     }
 
 
+def _normalize_bullet(text: str) -> str:
+    """Normalize a bullet for fuzzy comparison: lowercase, collapse whitespace, strip punctuation."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _fuzzy_is_duplicate(candidate: str, seen_normalized: list[str], threshold: float = 0.85) -> bool:
+    """
+    Return True if candidate is a near-duplicate of any already-seen bullet.
+    Uses SequenceMatcher ratio on normalized text. Catches variants like
+    'as a general recovery step' vs 'as a recovery step' (same rule, different ending).
+    """
+    import difflib
+    norm = _normalize_bullet(candidate)
+    if not norm:
+        return False
+    for existing in seen_normalized:
+        if difflib.SequenceMatcher(None, norm, existing).ratio() >= threshold:
+            return True
+    return False
+
+
 def _deduplicate_memory(content: str) -> str:
     """
     Remove duplicate bullet lines within each section. Keeps the first occurrence.
     Resets dedup scope at each heading so the same bullet can appear in different sections.
+    Uses both exact-match and fuzzy matching (SequenceMatcher >= 0.85) to catch
+    near-duplicates with slightly different phrasing.
     """
     lines = content.splitlines()
-    seen: set[str] = set()
+    seen_exact: set[str] = set()
+    seen_normalized: list[str] = []
     result: list[str] = []
     for line in lines:
         if re.match(r"^#{1,6}\s+", line):
-            seen = set()
+            seen_exact = set()
+            seen_normalized = []
             result.append(line)
             continue
         stripped = line.strip()
         if stripped and stripped[0] in "-*+":
             key = re.sub(r"^[-*+]\s+", "", stripped.lower()).strip()
-            if key in seen:
+            if key in seen_exact:
                 continue
-            seen.add(key)
+            if _fuzzy_is_duplicate(key, seen_normalized):
+                continue
+            seen_exact.add(key)
+            seen_normalized.append(_normalize_bullet(key))
         result.append(line)
     return "\n".join(result)
 
