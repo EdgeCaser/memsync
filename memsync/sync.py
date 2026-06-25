@@ -25,18 +25,19 @@ _COLD_DELIM_RE = re.compile(r"<!--\s*memsync:cold\s*-->")
 SYSTEM_PROMPT = """You are maintaining a persistent two-layer global memory for an AI assistant user.
 Both files are synced across machines. Only the hot layer is loaded into Claude Code sessions.
 
-HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines.
+HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines AND under 38,000 characters.
   Contains: identity, active priorities, standing preferences, hard constraints.
 COLD layer (MEMORY_ARCHIVE.md): never in context — reference only.
   Contains: completed work, historical decisions, resolved items.
 
 YOUR JOB:
 - Merge new session notes into the hot layer
-- Keep the hot layer tight (under 100 lines) — demote completed or stale items to cold
+- Keep the hot layer tight (under 100 lines, under 38,000 chars) — demote completed or stale items to cold
 - Update facts that have changed
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
+- NEVER add job search status, specific job roles, or application pipeline state — that belongs in the Rolehunt project, not global memory
 - If nothing meaningful changed, return both layers UNCHANGED
 
 RETURN: Begin your response with the first delimiter — no preamble before it:
@@ -51,7 +52,7 @@ RETURN: Begin your response with the first delimiter — no preamble before it:
 HARVEST_SYSTEM_PROMPT = """You are maintaining a persistent two-layer global memory for an AI assistant user.
 Both files are synced across machines. Only the hot layer is loaded into Claude Code sessions.
 
-HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines.
+HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines AND under 38,000 characters.
   Contains: identity, active priorities, standing preferences, hard constraints.
 COLD layer (MEMORY_ARCHIVE.md): never in context — reference only.
   Contains: completed work, historical decisions, resolved items.
@@ -65,11 +66,12 @@ Read the conversation transcript below and extract facts worth adding to persist
 - Anything the user would want to know in a future session
 
 Then merge those extractions into the appropriate layer:
-- Keep the hot layer tight (under 100 lines) — demote completed or stale items to cold
+- Keep the hot layer tight (under 100 lines, under 38,000 chars) — demote completed or stale items to cold
 - Update facts that have changed
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
+- NEVER add job search status, specific job roles, or application pipeline state — that belongs in the Rolehunt project, not global memory
 - If the conversation contained nothing worth persisting, return both layers UNCHANGED
 
 RETURN: Begin your response with the first delimiter — no preamble before it:
@@ -96,17 +98,18 @@ RETURN: Only the bullet list or NONE. No explanation, no preamble."""
 MERGE_SYSTEM_PROMPT = """You are maintaining a persistent two-layer global memory for an AI assistant user.
 Both files are synced across machines. Only the hot layer is loaded into Claude Code sessions.
 
-HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines.
+HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines AND under 38,000 characters.
   Contains: identity, active priorities, standing preferences, hard constraints.
 COLD layer (MEMORY_ARCHIVE.md): never in context — reference only.
   Contains: completed work, historical decisions, resolved items.
 
 You will receive candidate facts extracted from a recent session. Merge them into the appropriate layer:
-- Keep the hot layer tight (under 100 lines) — demote completed or stale items to cold
+- Keep the hot layer tight (under 100 lines, under 38,000 chars) — demote completed or stale items to cold
 - Update facts that have changed
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
+- NEVER add job search status, specific job roles, or application pipeline state — that belongs in the Rolehunt project, not global memory
 - If none of the candidates add meaningful new information, return both layers UNCHANGED
 
 RETURN: Begin your response with the first delimiter — no preamble before it:
