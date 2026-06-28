@@ -118,6 +118,37 @@ RETURN: Begin your response with the first delimiter — no preamble before it:
 <!-- memsync:cold -->
 [updated MEMORY_ARCHIVE.md content]"""
 
+# Append-only variant: the model never sees or regenerates the full cold archive.
+# It returns the updated hot layer plus ONLY the new entries to append to cold.
+# This keeps the merge output small (hot only + a small delta) and makes it
+# impossible to clobber the archive by echoing back a truncated view of it.
+MERGE_SYSTEM_PROMPT_APPEND = """You are maintaining a persistent two-layer global memory for an AI assistant user.
+Both files are synced across machines. Only the hot layer is loaded into Claude Code sessions.
+
+HOT layer (GLOBAL_MEMORY.md): always in context — keep under 100 lines AND under 38,000 characters.
+  Contains: identity, active priorities, standing preferences, hard constraints.
+COLD layer (MEMORY_ARCHIVE.md): never in context — an append-only archive of completed/historical items.
+
+You will receive the current HOT layer and candidate facts extracted from a recent session.
+Merge the candidates into the HOT layer:
+- Keep the hot layer tight (under 100 lines, under 38,000 chars)
+- Update facts that have changed
+- Preserve the user's exact voice, formatting, and section structure
+- NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
+- NEVER add a bullet that already exists verbatim or near-verbatim in the same section
+- NEVER add job search status, specific job roles, or application pipeline state — that belongs in the Rolehunt project, not global memory
+
+When a hot item is completed or stale, move it OUT of the hot layer and place it in the cold section below.
+The cold section is APPEND-ONLY: return ONLY the NEW entries to add to the archive (the demoted or
+newly-historical items). You are NOT shown the existing archive — do not reproduce or invent it. If nothing
+should be archived this round, leave the cold section empty.
+
+RETURN: Begin your response with the first delimiter — no preamble before it:
+<!-- memsync:hot -->
+[updated GLOBAL_MEMORY.md content]
+<!-- memsync:cold -->
+[ONLY new entries to append to the archive, or empty]"""
+
 
 def _strip_label_prefix(text: str) -> str:
     """Strip leading label lines (e.g. 'HOT MEMORY...') before the actual markdown content."""
@@ -177,6 +208,32 @@ def _parse_tiered_response(text: str, current_cold: str) -> tuple[str, str]:
 
     cold = _strip_label_prefix(cold_raw)
     return hot, cold
+
+
+def _append_cold_delta(raw: str, current_cold: str) -> str:
+    """
+    Append-only cold: extract ONLY the text after the cold delimiter (the new
+    archive entries the model produced) and append it to the existing archive.
+
+    Returns current_cold unchanged when there is no delta. Defends against the
+    model echoing the whole archive back (or our truncation marker) — in
+    append-only mode the model is never shown the archive, so anything that
+    looks like the full archive is treated as no-op rather than appended.
+    """
+    cold_match = _COLD_DELIM_RE.search(raw)
+    if cold_match is None:
+        return current_cold
+
+    delta = _strip_label_prefix(raw[cold_match.end():].strip()).strip()
+    if not delta or "[ARCHIVE TRUNCATED" in delta:
+        return current_cold
+    if current_cold.strip() and delta == current_cold.strip():
+        return current_cold  # model echoed the archive — ignore
+
+    if not current_cold.strip():
+        return _deduplicate_memory(delta)
+    combined = current_cold.rstrip() + "\n\n" + delta
+    return _deduplicate_memory(combined)
 
 
 def _truncate_archive_for_prompt(archive: str, max_lines: int) -> str:
@@ -385,6 +442,83 @@ def extract_candidates_from_chunk(chunk: str, config: Config) -> dict:
     raise LLMError("All LLM backends failed:\n" + "\n".join(errors))
 
 
+def harvest_sessions_batched(
+    sessions: list[tuple[str, str]],
+    current_memory: str,
+    config: Config,
+    current_cold: str = "",
+    deadline: float | None = None,
+) -> dict:
+    """
+    Batched harvest: extract candidate facts from every session, then merge ALL
+    of them into memory in a single pass.
+
+    The merge regenerates the full hot layer, which is the slow step (~minutes),
+    so doing it once per run instead of once per session is what keeps the run
+    inside its runtime budget. Extraction is many small, fast calls.
+
+    sessions: list of (session_id, transcript) tuples.
+    deadline: optional time.monotonic() value; stop extracting once reached and
+      merge what was collected so far (the rest retry next run). Reserve enough
+      headroom before the deadline for one merge — the caller does this.
+    Returns the usual merge result dict plus "harvested_ids" — the session ids
+    whose candidates were successfully extracted and folded into the merge.
+    A session that fails extraction is left out (not in harvested_ids) so it
+    retries next run. If the final merge raises, the caller marks nothing.
+    """
+    import time
+
+    all_candidates: list[str] = []
+    harvested_ids: list[str] = []
+    extract_input = 0
+    extract_output = 0
+
+    for session_id, transcript in sessions:
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.warning(
+                "batched harvest: extraction budget reached; merging %d collected session(s), "
+                "%d deferred to next run",
+                len(harvested_ids), len(sessions) - len(harvested_ids),
+            )
+            break
+        if not transcript.strip():
+            harvested_ids.append(session_id)  # empty transcript — nothing to extract, won't improve
+            continue
+        try:
+            ext = extract_candidates_from_chunk(transcript, config)
+        except Exception:  # noqa: BLE001
+            logger.warning("batched harvest: extract failed for %s — will retry next run", session_id)
+            continue  # not marked harvested
+        extract_input += ext["input_tokens"]
+        extract_output += ext["output_tokens"]
+        if ext["candidates"].strip():
+            all_candidates.append(ext["candidates"].strip())
+        harvested_ids.append(session_id)
+
+    combined = "\n".join(all_candidates).strip()
+    if not combined:
+        return {
+            "updated_content": current_memory.strip(),
+            "updated_cold": current_cold,
+            "changed": False,
+            "changed_hot": False,
+            "changed_cold": False,
+            "truncated": False,
+            "malformed": False,
+            "input_tokens": extract_input,
+            "output_tokens": extract_output,
+            "backend": "none",
+            "chunks_processed": 0,
+            "harvested_ids": harvested_ids,
+        }
+
+    result = merge_candidates_into_memory(combined, current_memory, config, current_cold)
+    result["input_tokens"] = result.get("input_tokens", 0) + extract_input
+    result["output_tokens"] = result.get("output_tokens", 0) + extract_output
+    result["harvested_ids"] = harvested_ids
+    return result
+
+
 def _chunk_candidate_facts(candidates: str, max_tokens: int) -> list[str]:
     """Split candidate facts into line-preserving batches for smaller backends."""
     if not candidates.strip():
@@ -422,12 +556,25 @@ def _merge_candidates_batch_with_backend(
     current_cold: str = "",
 ) -> dict:
     """Merge one candidate batch using one specific backend."""
-    archive_section = ""
-    if config.archive_in_harvest and current_cold:
-        truncated = _truncate_archive_for_prompt(current_cold, config.archive_max_lines_in_prompt)
-        archive_section = f"\nCOLD ARCHIVE (reference only — never in context):\n{truncated}\n"
+    append_only = config.harvest_append_only_cold
 
-    user_prompt = f"""\
+    if append_only:
+        # Hot only — the model never sees the archive, so it can't clobber it,
+        # and the merge output stays small (hot + a tiny cold delta).
+        system_prompt = MERGE_SYSTEM_PROMPT_APPEND
+        user_prompt = f"""\
+HOT MEMORY (always in context — keep under {config.max_hot_lines} lines):
+{current_memory}
+
+CANDIDATE FACTS:
+{candidates}"""
+    else:
+        archive_section = ""
+        if config.archive_in_harvest and current_cold:
+            truncated = _truncate_archive_for_prompt(current_cold, config.archive_max_lines_in_prompt)
+            archive_section = f"\nCOLD ARCHIVE (reference only — never in context):\n{truncated}\n"
+        system_prompt = MERGE_SYSTEM_PROMPT
+        user_prompt = f"""\
 HOT MEMORY (always in context — keep under {config.max_hot_lines} lines):
 {current_memory}{archive_section}
 CANDIDATE FACTS:
@@ -435,13 +582,13 @@ CANDIDATE FACTS:
 
     llm_result = call_llm_with_backend(
         backend,
-        MERGE_SYSTEM_PROMPT,
+        system_prompt,
         user_prompt,
         _HOT_DELIMITER,
         config,
     )
     raw = _strip_model_wrapper(llm_result["text"])
-    updated_hot, updated_cold = _parse_tiered_response(raw, current_cold)
+    updated_hot, parsed_cold = _parse_tiered_response(raw, current_cold)
 
     if not _looks_like_memory_file(updated_hot):
         return {
@@ -457,7 +604,12 @@ CANDIDATE FACTS:
 
     updated_hot = enforce_hard_constraints(current_memory, updated_hot)
     updated_hot = _deduplicate_memory(updated_hot)
-    updated_cold = _deduplicate_memory(updated_cold)
+
+    if append_only:
+        updated_cold = _append_cold_delta(raw, current_cold)
+    else:
+        updated_cold = _deduplicate_memory(parsed_cold)
+
     changed_hot = updated_hot != current_memory.strip()
     changed_cold = updated_cold != current_cold.strip()
 

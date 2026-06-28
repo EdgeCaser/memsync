@@ -208,7 +208,7 @@ def job_nightly_harvest(config: Config) -> None:
         save_harvested_index,
     )
     from memsync.providers import get_provider
-    from memsync.sync import harvest_memory_content, load_or_init_archive, load_or_init_memory
+    from memsync.sync import harvest_sessions_batched, load_or_init_archive, load_or_init_memory
 
     try:
         started_at = time.monotonic()
@@ -260,7 +260,9 @@ def job_nightly_harvest(config: Config) -> None:
 
         logger.info("nightly_harvest: processing %d new session(s)", len(new_sessions))
 
-        # Process sessions sequentially — each one builds on the updated memory
+        # Batched harvest: extract from every session, then merge ONCE. The merge
+        # regenerates the full hot layer (~minutes), so a per-session merge blows
+        # the runtime budget — batching keeps it to a single regeneration per run.
         archive_path = memory_root / "MEMORY_ARCHIVE.md"
         current_memory = load_or_init_memory(memory_path)
         current_cold = load_or_init_archive(archive_path)
@@ -268,62 +270,57 @@ def job_nightly_harvest(config: Config) -> None:
         changed_cold_any = False
         llm_config = _daemon_llm_config(config)
 
+        # Read transcripts (cheap, local) and track message counts for the index.
+        sessions: list[tuple[str, str]] = []
+        message_counts: dict[str, int] = {}
         for session_path in new_sessions:
-            max_runtime = config.daemon.harvest_max_runtime_seconds
-            elapsed = time.monotonic() - started_at
-            if max_runtime > 0 and elapsed >= max_runtime:
-                logger.warning(
-                    "nightly_harvest: stopping after %.0fs runtime budget; "
-                    "remaining sessions will retry next run",
-                    elapsed,
-                )
-                break
-
             transcript, message_count = read_session_transcript(session_path)
+            message_counts[session_path.stem] = message_count
+            sessions.append((session_path.stem, transcript))
 
-            if not transcript.strip():
-                harvested[session_path.stem] = message_count  # empty; won't improve on retry
-                logger.debug("nightly_harvest: empty transcript in %s, skipping", session_path.stem)  # noqa: E501
-                continue
+        # Reserve one merge's worth of time before the runtime budget runs out.
+        max_runtime = config.daemon.harvest_max_runtime_seconds
+        deadline = (
+            started_at + max_runtime - config.claude_code_timeout
+            if max_runtime > 0
+            else None
+        )
 
-            try:
-                result = harvest_memory_content(
-                    transcript,
-                    current_memory,
-                    llm_config,
-                    current_cold,
-                )
-            except Exception:
+        try:
+            result = harvest_sessions_batched(
+                sessions, current_memory, llm_config, current_cold, deadline=deadline
+            )
+        except Exception:
+            logger.warning(
+                "nightly_harvest: batched merge failed — sessions will retry next run"
+            )
+            result = None
+
+        if result is not None:
+            if result.get("truncated") or result.get("malformed"):
+                # Don't mark anything — the write is skipped, so let them retry.
                 logger.warning(
-                    "nightly_harvest: all backends failed for %s — will retry next run",
-                    session_path.stem,
+                    "nightly_harvest: merge response %s — skipping write",
+                    "truncated" if result.get("truncated") else "malformed",
                 )
-                continue  # not marked — will retry on next run
+            else:
+                for sid in result.get("harvested_ids", []):
+                    harvested[sid] = message_counts.get(sid, 0)
+                if result["changed"]:
+                    current_memory = result["updated_content"]
+                    changed_any = True
+                    if result.get("changed_cold") and result.get("updated_cold"):
+                        current_cold = result["updated_cold"]
+                        changed_cold_any = True
+                    tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
+                    logger.info(
+                        "nightly_harvest: merged %d session(s) [%s, %d tokens]",
+                        len(result.get("harvested_ids", [])),
+                        result.get("backend", "unknown"),
+                        tokens,
+                    )
 
-            harvested[session_path.stem] = message_count
-
-            if result["truncated"]:
-                logger.warning(
-                    "nightly_harvest: response truncated for session %s — skipping write",
-                    session_path.stem,
-                )
-                continue
-
-            if result["changed"]:
-                current_memory = result["updated_content"]
-                changed_any = True
-                if result.get("changed_cold") and result.get("updated_cold"):
-                    current_cold = result["updated_cold"]
-                    changed_cold_any = True
-                backend = result.get("backend", "unknown")
-                chunks = result.get("chunks_processed", 1)
-                tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
-                logger.info(
-                    "nightly_harvest: updated from %s [%s, %d chunk(s), %d tokens]",
-                    session_path.stem, backend, chunks, tokens,
-                )
-
-        # Persist index and write memory once after all sessions processed
+        # Persist index and write memory once after the batch
         save_harvested_index(memory_root, harvested)
 
         if changed_any:

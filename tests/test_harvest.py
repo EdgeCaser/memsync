@@ -634,8 +634,9 @@ class TestChunkedHarvest:
         assert len(call_count) == 1
 
     def test_merge_includes_archive_in_prompt_when_cold_provided(self):
-        """merge_candidates_into_memory should inject cold archive into the LLM user prompt."""
-        config = Config()
+        """Legacy (non-append-only) merge injects the cold archive into the LLM user prompt."""
+        import dataclasses
+        config = dataclasses.replace(Config(), harvest_append_only_cold=False)
         current_cold = "# Archive\n- something done\n"
         captured = []
 
@@ -649,3 +650,127 @@ class TestChunkedHarvest:
 
         assert "COLD ARCHIVE" in captured[0]
         assert "something done" in captured[0]
+
+    def test_append_only_merge_excludes_archive_and_appends_delta(self):
+        """Append-only merge: archive is not fed into the prompt, and the cold delta is appended."""
+        import dataclasses
+        config = dataclasses.replace(Config(), harvest_append_only_cold=True)
+        current_cold = "# Archive\n- old item\n"
+        captured = []
+
+        # Model returns updated hot plus ONE new entry to append under the cold delimiter.
+        response = (
+            "<!-- memsync:hot -->\n" + SAMPLE_MEMORY
+            + "\n<!-- memsync:cold -->\n- newly archived item\n"
+        )
+
+        def fake_llm(backend, system, user, prefill, cfg):
+            captured.append(user)
+            return {"text": response, "input_tokens": 5, "output_tokens": 5, "truncated": False}
+
+        with patch("memsync.sync.resolve_backends", return_value=[("codex", object())]):
+            with patch("memsync.sync.call_llm_with_backend", side_effect=fake_llm):
+                result = merge_candidates_into_memory("- new fact\n", SAMPLE_MEMORY, config, current_cold)
+
+        assert "COLD ARCHIVE" not in captured[0]  # archive never enters the prompt
+        assert "old item" in result["updated_cold"]  # existing archive preserved (append-only)
+        assert "newly archived item" in result["updated_cold"]  # delta appended
+
+
+class TestBatchedHarvest:
+    """harvest_sessions_batched: extract per session, merge once."""
+
+    def test_extracts_each_session_merges_once(self):
+        from memsync.sync import harvest_sessions_batched
+
+        config = Config()
+        sessions = [("s1", "transcript one"), ("s2", "transcript two")]
+
+        def fake_extract(transcript, cfg):
+            return {
+                "candidates": f"- fact from {transcript}",
+                "truncated": False,
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "backend": "x",
+                "chunks_processed": 1,
+            }
+
+        merge_calls = []
+
+        def fake_merge(candidates, memory, cfg, cold):
+            merge_calls.append(candidates)
+            return {
+                "updated_content": memory,
+                "updated_cold": cold,
+                "changed": True,
+                "changed_hot": True,
+                "changed_cold": False,
+                "truncated": False,
+                "malformed": False,
+                "input_tokens": 2,
+                "output_tokens": 2,
+                "backend": "x",
+            }
+
+        with patch("memsync.sync.extract_candidates_from_chunk", side_effect=fake_extract):
+            with patch("memsync.sync.merge_candidates_into_memory", side_effect=fake_merge):
+                result = harvest_sessions_batched(sessions, "# Mem\n", config, "")
+
+        assert len(merge_calls) == 1  # one merge for the whole batch
+        assert "fact from transcript one" in merge_calls[0]
+        assert "fact from transcript two" in merge_calls[0]
+        assert set(result["harvested_ids"]) == {"s1", "s2"}
+
+    def test_deadline_defers_remaining_sessions(self):
+        from memsync.sync import harvest_sessions_batched
+
+        config = Config()
+        sessions = [("s1", "t1"), ("s2", "t2")]
+
+        # A deadline already in the past → no extraction, no merge, nothing marked.
+        with patch("memsync.sync.merge_candidates_into_memory") as fake_merge:
+            result = harvest_sessions_batched(sessions, "# Mem\n", config, "", deadline=-1.0)
+
+        fake_merge.assert_not_called()
+        assert result["harvested_ids"] == []
+        assert result["changed"] is False
+
+    def test_failed_extraction_not_marked_harvested(self):
+        from memsync.sync import harvest_sessions_batched
+
+        config = Config()
+        sessions = [("good", "t1"), ("bad", "t2")]
+
+        def fake_extract(transcript, cfg):
+            if transcript == "t2":
+                raise RuntimeError("backend down")
+            return {
+                "candidates": "- a fact",
+                "truncated": False,
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "backend": "x",
+                "chunks_processed": 1,
+            }
+
+        def fake_merge(candidates, memory, cfg, cold):
+            return {
+                "updated_content": memory,
+                "updated_cold": cold,
+                "changed": True,
+                "changed_hot": True,
+                "changed_cold": False,
+                "truncated": False,
+                "malformed": False,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "backend": "x",
+            }
+
+        with patch("memsync.sync.extract_candidates_from_chunk", side_effect=fake_extract):
+            with patch("memsync.sync.merge_candidates_into_memory", side_effect=fake_merge):
+                result = harvest_sessions_batched(sessions, "# Mem\n", config, "")
+
+        assert "good" in result["harvested_ids"]
+        assert "bad" not in result["harvested_ids"]  # failed extraction retries next run
