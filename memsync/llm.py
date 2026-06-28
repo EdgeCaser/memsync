@@ -569,7 +569,7 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
             cmd,
             input=full_prompt.encode("utf-8"),
             capture_output=True,
-            timeout=600,
+            timeout=config.claude_code_timeout,
             cwd=tempfile.gettempdir(),  # neutral dir — avoids loading any project CLAUDE.md
             **no_window_kwargs(),
         )
@@ -634,7 +634,7 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
     except FileNotFoundError as e:
         raise RuntimeError("codex CLI not found on PATH") from e
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError("codex CLI timed out after 120 seconds") from e
+        raise RuntimeError(f"codex CLI timed out after {config.codex_timeout} seconds") from e
 
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()

@@ -159,6 +159,7 @@ class Config:
     fallback_backend: str = DEFAULT_LLM_BACKENDS[1]  # legacy; ignored when llm_backends is set
     claude_code_model: str = "haiku"         # alias for `claude --model`; "" = inherit CLI default
     claude_code_effort: str = "low"          # passed to `claude --effort`; "" = inherit CLI default
+    claude_code_timeout: int = 420           # seconds; headroom over a full merge, caps hangs
     gemini_api_key: str = ""                 # AI Studio key; leave empty to use ADC instead
     gemini_model: str = "gemini-2.5-flash"    # any model available on your Gemini account
     ollama_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
@@ -179,6 +180,9 @@ class Config:
     max_hot_lines: int = 100                 # hard cap on GLOBAL_MEMORY.md (hot layer)
     archive_in_harvest: bool = True          # whether harvest/refresh consults MEMORY_ARCHIVE.md
     archive_max_lines_in_prompt: int = 300   # truncation limit for archive in LLM call
+    # merge appends new cold entries instead of regenerating the whole archive
+    # (keeps merges fast and makes it impossible to clobber the archive)
+    harvest_append_only_cold: bool = True
 
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
@@ -275,6 +279,7 @@ class Config:
             fallback_backend=llm_backends[1] if len(llm_backends) > 1 else "none",
             claude_code_model=llm_raw.get("claude_code_model", "haiku"),
             claude_code_effort=llm_raw.get("claude_code_effort", "low"),
+            claude_code_timeout=llm_raw.get("claude_code_timeout", 420),
             gemini_api_key=llm_raw.get("gemini_api_key", ""),
             gemini_model=llm_raw.get("gemini_model", "gemini-2.5-flash"),
             ollama_base_url=llm_raw.get("ollama_base_url", "http://localhost:11434/v1"),
@@ -311,6 +316,7 @@ class Config:
             max_hot_lines=core.get("max_hot_lines", 100),
             archive_in_harvest=core.get("archive_in_harvest", True),
             archive_max_lines_in_prompt=core.get("archive_max_lines_in_prompt", 300),
+            harvest_append_only_cold=core.get("harvest_append_only_cold", True),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -349,6 +355,7 @@ class Config:
             f"max_hot_lines = {self.max_hot_lines}",
             f"archive_in_harvest = {str(self.archive_in_harvest).lower()}",
             f"archive_max_lines_in_prompt = {self.archive_max_lines_in_prompt}",
+            f"harvest_append_only_cold = {str(self.harvest_append_only_cold).lower()}",
         ]
         if self.api_key:
             lines.append(f'api_key = "{self.api_key}"')
@@ -372,6 +379,7 @@ class Config:
             "backends = [" + ", ".join(f'"{b}"' for b in llm_backends) + "]",
             f'claude_code_model = "{self.claude_code_model}"',
             f'claude_code_effort = "{self.claude_code_effort}"',
+            f"claude_code_timeout = {self.claude_code_timeout}",
             f'gemini_model = "{self.gemini_model}"',
             f'ollama_base_url = "{self.ollama_base_url}"',
             f'ollama_model = "{self.ollama_model}"',
