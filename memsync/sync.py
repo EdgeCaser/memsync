@@ -34,6 +34,7 @@ YOUR JOB:
 - Merge new session notes into the hot layer
 - Keep the hot layer tight (under 100 lines, under 38,000 chars) — demote completed or stale items to cold
 - Update facts that have changed
+- When candidates conflict or describe a state that changed across the session(s) — a config value, a "primary" choice, a status — record ONLY the most current version. An explicit change ("reverted to X", "demoted Y", "now uses Z", "switched from A to B") supersedes the earlier statement; do not keep the superseded value as if it were still true.
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
@@ -68,6 +69,7 @@ Read the conversation transcript below and extract facts worth adding to persist
 Then merge those extractions into the appropriate layer:
 - Keep the hot layer tight (under 100 lines, under 38,000 chars) — demote completed or stale items to cold
 - Update facts that have changed
+- When candidates conflict or describe a state that changed across the session(s) — a config value, a "primary" choice, a status — record ONLY the most current version. An explicit change ("reverted to X", "demoted Y", "now uses Z", "switched from A to B") supersedes the earlier statement; do not keep the superseded value as if it were still true.
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
@@ -106,6 +108,7 @@ COLD layer (MEMORY_ARCHIVE.md): never in context — reference only.
 You will receive candidate facts extracted from a recent session. Merge them into the appropriate layer:
 - Keep the hot layer tight (under 100 lines, under 38,000 chars) — demote completed or stale items to cold
 - Update facts that have changed
+- When candidates conflict or describe a state that changed across the session(s) — a config value, a "primary" choice, a status — record ONLY the most current version. An explicit change ("reverted to X", "demoted Y", "now uses Z", "switched from A to B") supersedes the earlier statement; do not keep the superseded value as if it were still true.
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
@@ -133,6 +136,7 @@ You will receive the current HOT layer and candidate facts extracted from a rece
 Merge the candidates into the HOT layer:
 - Keep the hot layer tight (under 100 lines, under 38,000 chars)
 - Update facts that have changed
+- When candidates conflict or describe a state that changed across the session(s) — a config value, a "primary" choice, a status — record ONLY the most current version. An explicit change ("reverted to X", "demoted Y", "now uses Z", "switched from A to B") supersedes the earlier statement; do not keep the superseded value as if it were still true.
 - Preserve the user's exact voice, formatting, and section structure
 - NEVER remove entries under any "Hard constraints" or "Constraints" section — only append, always keep them hot
 - NEVER add a bullet that already exists verbatim or near-verbatim in the same section
