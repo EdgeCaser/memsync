@@ -28,6 +28,7 @@ from memsync.harvest import (
     read_session_transcript,
     save_harvested_index,
 )
+from memsync.journal import list_prunable_journal, prune_journal
 from memsync.llm import LLMError
 from memsync.providers import all_providers, auto_detect, get_provider
 from memsync.sync import (
@@ -1187,6 +1188,7 @@ def cmd_prune(args: argparse.Namespace, config: Config) -> int:
         return code
 
     backup_dir = memory_root / "backups"
+    journal_dir = memory_root / "journal"
     keep_days = args.keep_days if args.keep_days is not None else config.keep_days
 
     if args.dry_run:
@@ -1203,6 +1205,13 @@ def cmd_prune(args: argparse.Namespace, config: Config) -> int:
                 print(f"  {p.name}")
         else:
             print(f"[DRY RUN] No backups older than {keep_days} days.")
+        would_delete_journal = list_prunable_journal(journal_dir, keep_days)
+        if would_delete_journal:
+            n = len(would_delete_journal)
+            noun = "entry" if n == 1 else "entries"
+            print(f"[DRY RUN] Would prune {n} journal {noun} older than {keep_days} days.")
+        else:
+            print(f"[DRY RUN] No journal entries older than {keep_days} days.")
         return 0
 
     deleted = prune(backup_dir, keep_days=keep_days)
@@ -1212,6 +1221,14 @@ def cmd_prune(args: argparse.Namespace, config: Config) -> int:
             print(f"  removed: {p.name}")
     else:
         print(f"No backups older than {keep_days} days.")
+
+    deleted_journal = prune_journal(journal_dir, keep_days=keep_days)
+    if deleted_journal:
+        n = len(deleted_journal)
+        noun = "entry" if n == 1 else "entries"
+        print(f"Pruned {n} journal {noun} older than {keep_days} days.")
+    else:
+        print(f"No journal entries older than {keep_days} days.")
     return 0
 
 
