@@ -4,6 +4,7 @@ import platform
 
 import pytest
 
+import memsync.claude_md as claude_md
 from memsync.claude_md import is_synced, sync
 
 
@@ -106,3 +107,20 @@ class TestIsSynced:
         monkeypatch.setattr(platform, "system", lambda: "Darwin")
         sync(memory, target)
         assert is_synced(memory, target) is True
+
+
+def test_sync_is_noop_when_symlink_already_correct(tmp_path, monkeypatch):
+    # Simulate Windows so we exercise the previously copy-only branch.
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+
+    memory = tmp_path / "GLOBAL_MEMORY.md"
+    memory.write_text("hello", encoding="utf-8")
+    target = tmp_path / "CLAUDE.md"
+
+    # First sync creates the link (or copy fallback).
+    claude_md.sync(memory, target)
+    # Second sync must NOT raise SameFileError and must leave content intact.
+    claude_md.sync(memory, target)
+
+    assert target.read_text(encoding="utf-8") == "hello"
+    assert claude_md.is_synced(memory, target)
