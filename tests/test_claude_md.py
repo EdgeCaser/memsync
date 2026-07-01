@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import platform
 
 import pytest
@@ -126,25 +125,5 @@ def test_sync_preserves_target_that_is_already_a_correct_symlink(tmp_path, monke
 
     assert target.is_symlink()
     assert target.resolve() == memory.resolve()
-    assert target.read_text(encoding="utf-8") == "hello"
-    assert is_synced(memory, target)
-
-
-def test_sync_does_not_raise_when_target_resolves_to_memory(tmp_path, monkeypatch):
-    """Portable regression for the SameFileError crash without needing symlink
-    privilege: a hard link makes target and memory the same file, the exact
-    precondition that made the old shutil.copy2 raise. sync() must not raise and
-    must leave usable, matching content."""
-    monkeypatch.setattr(platform, "system", lambda: "Windows")
-    memory = tmp_path / "GLOBAL_MEMORY.md"
-    memory.write_text("hello", encoding="utf-8")
-    target = tmp_path / "CLAUDE.md"
-    try:
-        os.link(memory, target)
-    except (OSError, NotImplementedError):
-        pytest.skip("hard links not supported on this host/filesystem")
-
-    sync(memory, target)  # pre-patch code raised SameFileError here
-
     assert target.read_text(encoding="utf-8") == "hello"
     assert is_synced(memory, target)

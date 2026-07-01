@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 import shutil
 from collections.abc import Iterable
 from pathlib import Path
@@ -9,20 +10,31 @@ def sync(memory_path: Path, target_path: Path) -> None:
     """
     Keep target_path (CLAUDE.md) in sync with memory_path (GLOBAL_MEMORY.md).
 
-    All platforms: prefer a symlink. If a non-memsync file already exists at
-    the target, back it up first (.pre-memsync.bak) so user data is never lost.
+    If target_path is already a symlink pointing at memory_path, it is left
+    untouched. This supports setups where CLAUDE.md is intentionally symlinked
+    to the synced memory file, and avoids a SameFileError on Windows where the
+    copy path would otherwise copy a file onto itself.
 
-    Windows: symlinks require admin/Developer Mode. If symlink creation fails
-    (OSError), fall back to a copy, refreshed on every `memsync refresh`, so
-    drift is acceptable in practice.
+    Mac/Linux: create a symlink. If a non-memsync file already exists at the
+    target, back it up first (.pre-memsync.bak) so user data is never lost.
+
+    Windows: copy. Symlinks require admin/Developer Mode; the copy is refreshed
+    on every `memsync refresh`, so drift is acceptable in practice.
     """
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Prefer a symlink on every platform. On Windows this needs admin or
-    # Developer Mode; if unavailable, symlink_to raises OSError and we copy.
+    # Already a correct symlink to the memory file: leave it as-is. Avoids the
+    # SameFileError the Windows copy path would raise, and preserves an
+    # intentionally symlinked CLAUDE.md so live updates flow through.
+    if target_path.is_symlink() and target_path.resolve() == memory_path.resolve():
+        return
+
+    if platform.system() == "Windows":
+        shutil.copy2(memory_path, target_path)
+        return
+
+    # Mac / Linux: prefer a symlink.
     if target_path.is_symlink():
-        if target_path.resolve() == memory_path.resolve():
-            return  # already correct, no work needed, and avoids SameFileError
         target_path.unlink()
     elif target_path.exists():
         # Back up any existing real file before replacing it.
@@ -31,6 +43,7 @@ def sync(memory_path: Path, target_path: Path) -> None:
     try:
         target_path.symlink_to(memory_path)
     except OSError:
+        # Fallback to copy if symlink creation fails (e.g. cross-device).
         shutil.copy2(memory_path, target_path)
 
 
