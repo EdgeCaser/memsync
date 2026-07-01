@@ -148,6 +148,22 @@ def _build_cli_command(cli_path: str, *args: str) -> list[str]:
     return [cli_path, *args]
 
 
+def no_window_kwargs() -> dict:
+    """subprocess kwargs that suppress the console-window flash on Windows.
+
+    The daemon runs detached (no console of its own), so every child CLI call
+    would otherwise allocate a fresh console window and steal focus — a flash
+    per backend call, per session, on every scheduled cycle. CREATE_NO_WINDOW
+    runs the child without a window. Returns {} on non-Windows platforms, where
+    there is no console to create.
+    """
+    if sys.platform == "win32":
+        # getattr keeps this safe under tests that patch sys.platform to "win32"
+        # on a POSIX host, where the constant does not exist (0 == no flags).
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
+
 def _call_gemini(system: str, user: str, prefill: str, config: Config) -> dict:
     """
     Call the Gemini API using the native generateContent endpoint.
@@ -235,6 +251,7 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
             input=full_prompt.encode("utf-8"),  # bytes bypasses Windows cp1252 encoding issues
             capture_output=True,
             timeout=600,
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise RuntimeError("gemini CLI not found on PATH") from e
@@ -552,8 +569,9 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
             cmd,
             input=full_prompt.encode("utf-8"),
             capture_output=True,
-            timeout=600,
+            timeout=config.claude_code_timeout,
             cwd=tempfile.gettempdir(),  # neutral dir — avoids loading any project CLAUDE.md
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise RuntimeError("claude CLI not found on PATH") from e
@@ -611,11 +629,12 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
             input=full_prompt.encode("utf-8"),
             capture_output=True,
             timeout=config.codex_timeout,
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise RuntimeError("codex CLI not found on PATH") from e
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError("codex CLI timed out after 120 seconds") from e
+        raise RuntimeError(f"codex CLI timed out after {config.codex_timeout} seconds") from e
 
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()

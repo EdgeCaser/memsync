@@ -249,14 +249,21 @@ class TestJobNightlyHarvest:
             "changed_cold": False,
             "updated_content": "# Global Memory\n",
             "truncated": False,
+            "malformed": False,
+            "harvested_ids": [],
         }
 
-        with patch("memsync.sync.harvest_memory_content", return_value=mock_result) as mock_harvest:
+        with patch(
+            "memsync.sync.harvest_sessions_batched", return_value=mock_result
+        ) as mock_harvest:
             job_nightly_harvest(cfg)
 
-        assert mock_harvest.call_count == 2
+        # One batched merge for the whole run; sessions are capped at 2.
+        assert mock_harvest.call_count == 1
+        sessions_arg = mock_harvest.call_args[0][0]
+        assert len(sessions_arg) == 2
 
-    def test_runtime_budget_stops_before_starting_next_session(
+    def test_runtime_budget_passed_as_deadline(
         self, daemon_config: Config, tmp_path: Path
     ) -> None:
         import dataclasses
@@ -280,13 +287,18 @@ class TestJobNightlyHarvest:
             "changed_cold": False,
             "updated_content": "# Global Memory\n",
             "truncated": False,
+            "malformed": False,
+            "harvested_ids": [],
         }
 
-        with patch("memsync.daemon.scheduler.time.monotonic", side_effect=[0, 0, 11]):
-            with patch("memsync.sync.harvest_memory_content", return_value=mock_result) as mock_harvest:
-                job_nightly_harvest(cfg)
+        with patch(
+            "memsync.sync.harvest_sessions_batched", return_value=mock_result
+        ) as mock_harvest:
+            job_nightly_harvest(cfg)
 
+        # A configured runtime budget is handed to the batched harvest as a deadline.
         assert mock_harvest.call_count == 1
+        assert mock_harvest.call_args.kwargs.get("deadline") is not None
 
 
 # ---------------------------------------------------------------------------
