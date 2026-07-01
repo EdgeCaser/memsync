@@ -44,7 +44,7 @@ def is_synced(memory_path: Path, target_path: Path) -> bool:
     if target_path.is_symlink():
         return target_path.resolve() == memory_path.resolve()
 
-    # Windows copy path — compare content
+    # Windows copy path: compare content
     try:
         return target_path.read_bytes() == memory_path.read_bytes()
     except OSError:
