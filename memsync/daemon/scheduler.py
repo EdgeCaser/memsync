@@ -210,6 +210,8 @@ def job_nightly_harvest(config: Config) -> None:
     from memsync.providers import get_provider
     from memsync.sync import harvest_sessions_batched, load_or_init_archive, load_or_init_memory
 
+    lock_info = None
+    lock_root = None
     try:
         started_at = time.monotonic()
         provider = get_provider(config.provider)
@@ -222,6 +224,17 @@ def job_nightly_harvest(config: Config) -> None:
         memory_path = memory_root / "GLOBAL_MEMORY.md"
         if not memory_path.exists():
             logger.warning("nightly_harvest: GLOBAL_MEMORY.md not found, skipping")
+            return
+
+        # Advisory cross-machine lock: if another machine is mid-harvest into the
+        # shared store, defer this run rather than racing it into conflict copies.
+        from memsync.lock import LockHeld, acquire
+
+        try:
+            lock_info = acquire(memory_root, config.daemon.harvest_lock_stale_seconds)
+            lock_root = memory_root
+        except LockHeld as exc:
+            logger.warning("nightly_harvest: %s — skipping this run", exc)
             return
 
         # Resolve projects dir — configurable so users can point at a mounted/synced path
@@ -352,6 +365,11 @@ def job_nightly_harvest(config: Config) -> None:
 
     except Exception:
         logger.exception("nightly_harvest: unexpected error")
+    finally:
+        if lock_info is not None and lock_root is not None:
+            from memsync.lock import release
+
+            release(lock_root, lock_info)
 
 
 def job_backup_mirror(config: Config) -> None:
