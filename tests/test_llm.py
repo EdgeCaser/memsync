@@ -11,6 +11,7 @@ from memsync.llm import (
     _call_gemini,
     _call_ollama,
     _warmup_ollama_model,
+    no_window_kwargs,
 )
 
 
@@ -62,6 +63,7 @@ class TestCodexBackend:
         def fake_run(cmd, **kwargs):
             captured["cmd"] = cmd
             captured["input"] = kwargs.get("input")
+            captured["kwargs"] = kwargs
             return Result()
 
         with patch("memsync.llm.sys.platform", "win32"):
@@ -74,6 +76,19 @@ class TestCodexBackend:
         assert captured["cmd"][-1] == "-"
         assert captured["input"] == b"SYSTEM\n\nUSER"
         assert result["text"] == "ok"
+        # Scheduled cycles run detached, so the child CLI must not flash a window.
+        assert "creationflags" in captured["kwargs"]
+
+
+class TestNoWindowKwargs:
+    def test_windows_suppresses_console_window(self):
+        with patch("memsync.llm.sys.platform", "win32"):
+            kwargs = no_window_kwargs()
+        assert "creationflags" in kwargs
+
+    def test_non_windows_is_noop(self):
+        with patch("memsync.llm.sys.platform", "linux"):
+            assert no_window_kwargs() == {}
 
 
 class TestOllamaBackend:
