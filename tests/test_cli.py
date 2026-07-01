@@ -127,6 +127,19 @@ class TestCmdPrune:
         assert result == 0
         assert b.exists()  # not deleted
 
+    def test_prunes_old_journal_entries(self, memory_file, capsys):
+        config, tmp_path, global_memory = memory_file
+        journal_dir = config.sync_root / ".claude-memory" / "journal"
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        old = journal_dir / "refresh_20200101_000000_000000.json"
+        old.write_text("{}", encoding="utf-8")
+
+        result = cmd_prune(_args(keep_days=30), config)
+        out = capsys.readouterr().out
+        assert result == 0
+        assert not old.exists()
+        assert "journal" in out.lower()
+
 
 class TestCmdProviders:
     def test_lists_all_providers(self, tmp_config, capsys):
