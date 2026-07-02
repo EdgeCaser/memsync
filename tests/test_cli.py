@@ -763,6 +763,35 @@ class TestCmdHarvest:
         assert result == 0
         mock_all.assert_called_once()
 
+    def test_harvest_all_defers_when_store_locked(self, memory_file, capsys):
+        """A live foreign lock in the store makes --all defer without writing."""
+        import json
+        from datetime import UTC, datetime
+
+        from memsync.lock import LOCK_FILENAME
+
+        config, tmp_path, global_memory = memory_file
+        memory_root = global_memory.parent
+        (memory_root / LOCK_FILENAME).write_text(
+            json.dumps(
+                {"host": "other-machine", "pid": 4242,
+                 "ts": datetime.now(UTC).isoformat()}
+            ),
+            encoding="utf-8",
+        )
+        before = global_memory.read_text(encoding="utf-8")
+
+        result = _harvest_all(
+            _harvest_args(all=True, auto=True), config, memory_root, global_memory
+        )
+
+        assert result == 0
+        # Memory untouched — we deferred instead of harvesting.
+        assert global_memory.read_text(encoding="utf-8") == before
+        # Foreign lock left intact — we deferred, we did not steal a live lock.
+        on_disk = json.loads((memory_root / LOCK_FILENAME).read_text(encoding="utf-8"))
+        assert on_disk["host"] == "other-machine"
+
     def test_explicit_project_path(self, memory_file, monkeypatch, capsys):
         config, tmp_path, global_memory = memory_file
         project_dir = tmp_path / "project"
