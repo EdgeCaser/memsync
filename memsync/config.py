@@ -132,6 +132,7 @@ class DaemonConfig:
     harvest_allow_ollama: bool = False              # unattended local LLM work can run hot
     harvest_max_runtime_seconds: int = 1800          # stop starting new sessions after 30 min
     harvest_max_sessions_per_run: int = 25           # prevent one backlog from monopolizing host
+    harvest_lock_stale_seconds: int = 3600           # store lock: older = abandoned, steal
 
     # Weekly digest email
     digest_enabled: bool = False
@@ -246,6 +247,7 @@ class Config:
             harvest_allow_ollama=daemon_raw.get("harvest_allow_ollama", False),
             harvest_max_runtime_seconds=daemon_raw.get("harvest_max_runtime_seconds", 1800),
             harvest_max_sessions_per_run=daemon_raw.get("harvest_max_sessions_per_run", 25),
+            harvest_lock_stale_seconds=daemon_raw.get("harvest_lock_stale_seconds", 3600),
             digest_enabled=daemon_raw.get("digest_enabled", False),
             digest_schedule=daemon_raw.get("digest_schedule", "0 9 * * 1"),
             digest_email_to=daemon_raw.get("digest_email_to", ""),
@@ -424,6 +426,7 @@ class Config:
                 f"harvest_allow_ollama = {str(d.harvest_allow_ollama).lower()}",
                 f"harvest_max_runtime_seconds = {d.harvest_max_runtime_seconds}",
                 f"harvest_max_sessions_per_run = {d.harvest_max_sessions_per_run}",
+                f"harvest_lock_stale_seconds = {d.harvest_lock_stale_seconds}",
                 f"digest_enabled = {str(d.digest_enabled).lower()}",
                 f'digest_schedule = "{d.digest_schedule}"',
                 f'digest_email_to = "{d.digest_email_to}"',

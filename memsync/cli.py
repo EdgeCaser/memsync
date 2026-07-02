@@ -523,6 +523,33 @@ def _harvest_all(
     memory_root: Path,
     global_memory: Path,
 ) -> int:
+    """Sweep all projects, holding the shared-store lock so two machines don't
+    harvest into the same synced store at once (which produces Syncthing
+    conflict copies). If another machine is mid-harvest, defer with a friendly
+    message rather than racing it."""
+    from memsync.lock import DEFAULT_STALE_SECONDS, LockHeld, store_lock
+
+    stale = getattr(
+        getattr(config, "daemon", None), "harvest_lock_stale_seconds", DEFAULT_STALE_SECONDS
+    )
+    try:
+        with store_lock(memory_root, stale):
+            return _harvest_all_locked(args, config, memory_root, global_memory)
+    except LockHeld as exc:
+        msg = f"Another harvest is running on {exc.host} (pid {exc.pid}); skipping this run."
+        if args.auto:
+            logger.warning("harvest: %s", exc)
+        else:
+            print(msg)
+        return 0
+
+
+def _harvest_all_locked(
+    args: argparse.Namespace,
+    config: Config,
+    memory_root: Path,
+    global_memory: Path,
+) -> int:
     """Sweep all projects under ~/.claude/projects/ and harvest unprocessed sessions."""
     import time
 
