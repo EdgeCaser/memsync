@@ -494,3 +494,53 @@ class TestMergeCandidatesMalformed:
             }):
                 result = merge_candidates_into_memory("- fact\n", SAMPLE_MEMORY, config)
         assert result["malformed"] is True
+
+
+class TestSemanticDedupeMemory:
+    @staticmethod
+    def _llm_result(text: str) -> dict:
+        return {"text": text, "input_tokens": 5, "output_tokens": 5, "truncated": False}
+
+    def test_removes_duplicate_returns_subset(self):
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        # Model correctly drops the second near-duplicate, keeps everything else verbatim.
+        cleaned = SAMPLE_MEMORY.replace("- Always backup before writing\n", "")
+        with patch("memsync.llm.call_llm", return_value=self._llm_result(cleaned)):
+            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
+        assert "Never rewrite from scratch" in result
+        assert "Always backup before writing" not in result
+
+    def test_rejects_too_short_response(self):
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        with patch("memsync.llm.call_llm", return_value=self._llm_result("# Global Memory\n")):
+            with pytest.raises(ValueError, match="too short"):
+                semantic_dedupe_memory(SAMPLE_MEMORY, config)
+
+    def test_rejects_prepended_commentary(self):
+        # The real failure mode: model prepends chat commentary as file content.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        polluted = (
+            "No semantic duplicate bullets were found — the file is returned unchanged.\n\n"
+            + SAMPLE_MEMORY
+        )
+        with patch("memsync.llm.call_llm", return_value=self._llm_result(polluted)):
+            with pytest.raises(ValueError, match="introduced"):
+                semantic_dedupe_memory(SAMPLE_MEMORY, config)
+
+    def test_rejects_appended_commentary(self):
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        polluted = SAMPLE_MEMORY + "\nLet me know if you'd like anything else!\n"
+        with patch("memsync.llm.call_llm", return_value=self._llm_result(polluted)):
+            with pytest.raises(ValueError, match="introduced"):
+                semantic_dedupe_memory(SAMPLE_MEMORY, config)
+
+    def test_unchanged_file_passes(self):
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        with patch("memsync.llm.call_llm", return_value=self._llm_result(SAMPLE_MEMORY)):
+            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
+        assert "Never rewrite from scratch" in result
