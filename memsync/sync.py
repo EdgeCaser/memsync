@@ -312,6 +312,26 @@ def semantic_dedupe_memory(content: str, config: Config) -> str:
             f"Semantic dedupe response too short ({len(cleaned)} chars vs "
             f"{len(content)} original) — rejecting to avoid data loss."
         )
+    # Guard: a dedupe may only REMOVE lines, never introduce new ones. Models
+    # sometimes ignore "return ONLY the cleaned file" and prepend chat commentary
+    # ("No duplicates were found…") or flag something — which would then be
+    # written verbatim into GLOBAL_MEMORY.md and loaded into every session. The
+    # short-response guard above misses this because such pollution makes the
+    # file LONGER. Fail closed if the output contains any non-blank line that
+    # was not present verbatim in the input.
+    original_lines = {ln.strip() for ln in content.splitlines() if ln.strip()}
+    introduced = [
+        ln.strip()
+        for ln in cleaned.splitlines()
+        if ln.strip() and ln.strip() not in original_lines
+    ]
+    if introduced:
+        preview = introduced[0][:80]
+        raise ValueError(
+            f"Semantic dedupe introduced {len(introduced)} line(s) absent from the "
+            f"original (e.g. {preview!r}) — rejecting to avoid writing model "
+            "commentary into memory."
+        )
     return cleaned
 
 
