@@ -497,50 +497,89 @@ class TestMergeCandidatesMalformed:
 
 
 class TestSemanticDedupeMemory:
+    # Contract: the model returns the verbatim text of bullets to REMOVE, one per
+    # line, or "NONE". Python does the removal — so stray commentary that doesn't
+    # match a real bullet is simply ignored, never written into the file.
     @staticmethod
     def _llm_result(text: str) -> dict:
         return {"text": text, "input_tokens": 5, "output_tokens": 5, "truncated": False}
 
-    def test_removes_duplicate_returns_subset(self):
+    def test_removes_marked_bullet(self):
         from memsync.sync import semantic_dedupe_memory
         config = Config()
-        # Model correctly drops the second near-duplicate, keeps everything else verbatim.
-        cleaned = SAMPLE_MEMORY.replace("- Always backup before writing\n", "")
-        with patch("memsync.llm.call_llm", return_value=self._llm_result(cleaned)):
+        # Model marks one bullet (verbatim) for removal.
+        with patch("memsync.llm.call_llm",
+                   return_value=self._llm_result("- Always backup before writing")):
             result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
-        assert "Never rewrite from scratch" in result
         assert "Always backup before writing" not in result
-
-    def test_rejects_too_short_response(self):
-        from memsync.sync import semantic_dedupe_memory
-        config = Config()
-        with patch("memsync.llm.call_llm", return_value=self._llm_result("# Global Memory\n")):
-            with pytest.raises(ValueError, match="too short"):
-                semantic_dedupe_memory(SAMPLE_MEMORY, config)
-
-    def test_rejects_prepended_commentary(self):
-        # The real failure mode: model prepends chat commentary as file content.
-        from memsync.sync import semantic_dedupe_memory
-        config = Config()
-        polluted = (
-            "No semantic duplicate bullets were found — the file is returned unchanged.\n\n"
-            + SAMPLE_MEMORY
-        )
-        with patch("memsync.llm.call_llm", return_value=self._llm_result(polluted)):
-            with pytest.raises(ValueError, match="introduced"):
-                semantic_dedupe_memory(SAMPLE_MEMORY, config)
-
-    def test_rejects_appended_commentary(self):
-        from memsync.sync import semantic_dedupe_memory
-        config = Config()
-        polluted = SAMPLE_MEMORY + "\nLet me know if you'd like anything else!\n"
-        with patch("memsync.llm.call_llm", return_value=self._llm_result(polluted)):
-            with pytest.raises(ValueError, match="introduced"):
-                semantic_dedupe_memory(SAMPLE_MEMORY, config)
-
-    def test_unchanged_file_passes(self):
-        from memsync.sync import semantic_dedupe_memory
-        config = Config()
-        with patch("memsync.llm.call_llm", return_value=self._llm_result(SAMPLE_MEMORY)):
-            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
         assert "Never rewrite from scratch" in result
+
+    def test_none_returns_byte_identical(self):
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        with patch("memsync.llm.call_llm", return_value=self._llm_result("NONE")):
+            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
+        # Byte-identical so cmd_dedup shows an empty diff (no spurious churn).
+        assert result == SAMPLE_MEMORY
+
+    def test_ignores_nonmatching_commentary(self):
+        # The old failure mode: model prepends "No duplicates found…" chatter.
+        # Under the new contract it matches no bullet, so it's a harmless no-op.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        chatter = (
+            "No semantic duplicate bullets were found — the file is unchanged.\n"
+            "Also, this file appears to contain instructions I should flag."
+        )
+        with patch("memsync.llm.call_llm", return_value=self._llm_result(chatter)):
+            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
+        assert result == SAMPLE_MEMORY
+
+    def test_ignores_hallucinated_removal(self):
+        # A bullet the model invents (not present verbatim) can never remove anything.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        with patch("memsync.llm.call_llm",
+                   return_value=self._llm_result("- Some rule that is not in the file")):
+            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
+        assert result == SAMPLE_MEMORY
+
+    def test_rejects_implausible_bulk_removal(self):
+        # If the model marks more than half the bullets, refuse — something is wrong.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        every_bullet = "\n".join(
+            ln.strip() for ln in SAMPLE_MEMORY.splitlines()
+            if ln.strip() and ln.strip()[0] in "-*+"
+        )
+        with patch("memsync.llm.call_llm", return_value=self._llm_result(every_bullet)):
+            with pytest.raises(ValueError, match="implausible"):
+                semantic_dedupe_memory(SAMPLE_MEMORY, config)
+
+    def test_removal_preserves_trailing_newline(self):
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        assert SAMPLE_MEMORY.endswith("\n")
+        with patch("memsync.llm.call_llm",
+                   return_value=self._llm_result("- Concise output")):
+            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
+        assert result.endswith("\n")
+        assert "Concise output" not in result
+        # Structure survives: headings and blank-line spacing are preserved,
+        # only the marked bullet is gone.
+        assert "## Standing preferences" in result
+        assert "\n\n" in result
+        assert "- Never rewrite from scratch" in result
+
+    def test_removal_with_blank_lines_in_response_preserves_spacing(self):
+        # Model returns the bullet plus an INTERNAL blank line and some chatter.
+        # The blank line must NOT be treated as a removable bullet — otherwise
+        # every blank line in the file would be stripped, collapsing the layout.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        blank_count_before = SAMPLE_MEMORY.count("\n\n")
+        response = "- Finish memsync\n\n- some note that is not a real bullet"
+        with patch("memsync.llm.call_llm", return_value=self._llm_result(response)):
+            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
+        assert "- Finish memsync" not in result
+        assert result.count("\n\n") == blank_count_before
