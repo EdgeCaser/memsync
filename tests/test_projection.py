@@ -29,19 +29,22 @@ def local_config(tmp_path, **kwargs):
         **kwargs,
     )
 
+# Fixtures are deliberately synthetic. memsync's own memory files are personal
+# by definition, so a fixture copied from one publishes its owner's data to
+# whatever repository the tests live in.
 SAMPLE_HOT = """\
 <!-- memsync v0.2 -->
 
-### Seattle Love Letter tracking
-- Repo lives on the Pi; posting Monday, Wednesday and Friday at 9am Pacific
-- Housing and zoning topics are off until August
+### Widget Factory tracking
+- Repo lives on the build server; releases go out Tuesday and Thursday
+- Pricing work is out of scope until the next quarter
 
 ### Memsync (active)
-- Daemon on the Pi runs a batched merge with a fail-fast timeout
+- Daemon runs a batched merge with a fail-fast timeout
 - Backend order is claude_code then gemini
 
 ## Hard constraints
-- Never post without explicit approval
+- Never publish without explicit approval
 - Backups before every write
 """
 
@@ -52,7 +55,7 @@ class TestSplitSections:
         preamble, sections = split_sections(SAMPLE_HOT)
         assert preamble == "<!-- memsync v0.2 -->"
         assert [s.title for s in sections] == [
-            "Seattle Love Letter tracking",
+            "Widget Factory tracking",
             "Memsync (active)",
             "Hard constraints",
         ]
@@ -79,16 +82,16 @@ class TestSplitSections:
 @pytest.mark.smoke
 class TestSlugify:
     def test_basic(self):
-        assert slugify("Seattle Love Letter tracking") == "seattle-love-letter-tracking"
+        assert slugify("Widget Factory tracking") == "widget-factory-tracking"
 
     def test_strips_parenthetical_status(self):
         assert slugify("Memsync (active)") == "memsync"
 
     def test_strips_markdown_emphasis(self):
-        assert slugify("**Slipway** app") == "slipway-app"
+        assert slugify("**Gadget** app") == "gadget-app"
 
     def test_handles_punctuation_and_slashes(self):
-        assert slugify("Jellyfin / Pi media library") == "jellyfin-pi-media-library"
+        assert slugify("Media / library tooling") == "media-library-tooling"
 
     def test_never_empty(self):
         assert slugify("!!!") == "untitled"
@@ -101,7 +104,7 @@ class TestSlugify:
 class TestDescribe:
     def test_uses_first_bullet(self):
         _, sections = split_sections(SAMPLE_HOT)
-        assert describe(sections[0]).startswith("Repo lives on the Pi")
+        assert describe(sections[0]).startswith("Repo lives on the build server")
 
     def test_truncates_on_word_boundary(self):
         _, sections = split_sections("### T\n- " + "alpha bravo " * 40 + "\n")
@@ -115,13 +118,13 @@ class TestDescribe:
         assert describe(sections[0]) == "No summary available."
 
     def test_preserves_underscores_in_identifiers(self):
-        # Stripping `_` as markdown emphasis rewrote seattle_love_letter into
-        # seattleloveletter, putting a path that does not exist in the index.
+        # Stripping `_` as markdown emphasis rewrote widget_factory into
+        # widgetfactory, putting a path that does not exist into the index.
         _, sections = split_sections(
-            "### T\n- Repo `/home/x/github/seattle_love_letter`; backend claude_code\n"
+            "### T\n- Repo `/home/x/github/widget_factory`; backend claude_code\n"
         )
         result = describe(sections[0])
-        assert "seattle_love_letter" in result
+        assert "widget_factory" in result
         assert "claude_code" in result
 
     def test_still_strips_backticks_and_asterisks(self):
@@ -135,20 +138,20 @@ class TestDescribe:
 class TestBuildProjection:
     def test_constraints_stay_in_core(self):
         projection = build_projection(SAMPLE_HOT, Config())
-        assert "Never post without explicit approval" in projection.core
+        assert "Never publish without explicit approval" in projection.core
         assert "Backups before every write" in projection.core
 
     def test_project_section_bodies_leave_the_core(self):
         # The index quotes each section's first bullet as its description, so
         # that line is expected to remain. Everything after it should not.
         projection = build_projection(SAMPLE_HOT, Config())
-        assert "Housing and zoning topics are off until August" not in projection.core
+        assert "Pricing work is out of scope until the next quarter" not in projection.core
         assert "Backend order is claude_code then gemini" not in projection.core
 
     def test_project_sections_become_topics(self):
         projection = build_projection(SAMPLE_HOT, Config())
         slugs = {t.slug for t in projection.topics}
-        assert slugs == {"seattle-love-letter-tracking", "memsync"}
+        assert slugs == {"widget-factory-tracking", "memsync"}
 
     def test_core_indexes_every_topic_without_the_skill(self):
         config = Config(skill_enabled=False)
@@ -163,7 +166,7 @@ class TestBuildProjection:
         assert topic.content.startswith("---\n")
         assert 'title: "Memsync (active)"' in topic.content
         assert "description:" in topic.content
-        assert "Daemon on the Pi" in topic.content
+        assert "Daemon runs a batched merge" in topic.content
 
     def test_core_is_much_smaller_on_a_realistic_file(self):
         # Shaped like the real hot layer: many project sections with several
@@ -194,8 +197,8 @@ class TestBuildProjection:
         # that would pay the cost twice.
         projection = build_projection(SAMPLE_HOT, Config(skill_enabled=True))
         assert "memsync-memory" in projection.core
-        assert "seattle-love-letter-tracking" not in projection.core
-        assert "Repo lives on the Pi" not in projection.core
+        assert "widget-factory-tracking" not in projection.core
+        assert "Repo lives on the build server" not in projection.core
 
     def test_colliding_slugs_are_suffixed_not_overwritten(self):
         # Both titles slugify to "memsync" once the parenthetical is stripped.
@@ -247,7 +250,7 @@ class TestShortTitle:
         assert short_title("GitHub off OneDrive — Phase 5 in progress") == "GitHub off OneDrive"
 
     def test_keeps_plain_title(self):
-        assert short_title("Cold Storage") == "Cold Storage"
+        assert short_title("Archive Tooling") == "Archive Tooling"
 
     def test_never_returns_empty(self):
         assert short_title("(only a parenthetical)") == "(only a parenthetical)"
@@ -321,7 +324,7 @@ class TestRenderSkill:
         config = local_config(tmp_path)
         skill = render_skill(build_projection(SAMPLE_HOT, config), config)
         assert "`topics/memsync.md`" in skill
-        assert "`topics/seattle-love-letter-tracking.md`" in skill
+        assert "`topics/widget-factory-tracking.md`" in skill
 
     def test_body_excludes_topic_bodies(self, tmp_path):
         # Body stays in context once loaded, so it is an index and nothing more.
@@ -337,7 +340,7 @@ class TestWriteProjection:
         write_projection(build_projection(SAMPLE_HOT, config), config)
         assert core_path(config).exists()
         assert (topics_path(config) / "memsync.md").exists()
-        assert (topics_path(config) / "seattle-love-letter-tracking.md").exists()
+        assert (topics_path(config) / "widget-factory-tracking.md").exists()
         assert (skill_root(config) / "SKILL.md").exists()
 
     def test_topics_live_inside_the_skill_directory(self, tmp_path):
@@ -367,13 +370,13 @@ class TestWriteProjection:
 
         shrunk = SAMPLE_HOT.replace(
             "### Memsync (active)\n"
-            "- Daemon on the Pi runs a batched merge with a fail-fast timeout\n"
+            "- Daemon runs a batched merge with a fail-fast timeout\n"
             "- Backend order is claude_code then gemini\n\n",
             "",
         )
         write_projection(build_projection(shrunk, config), config)
         assert not (topics_path(config) / "memsync.md").exists()
-        assert (topics_path(config) / "seattle-love-letter-tracking.md").exists()
+        assert (topics_path(config) / "widget-factory-tracking.md").exists()
 
     def test_leaves_unrelated_files_alone(self, tmp_path):
         config = local_config(tmp_path)

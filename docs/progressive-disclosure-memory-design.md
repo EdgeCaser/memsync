@@ -64,7 +64,7 @@ memsync-shared/.claude-memory/
   core/
     CLAUDE_CORE.md      generated: constraints + index. This is what syncs to ~/.claude/CLAUDE.md
     topics/
-      seattle-love-letter-tracking.md
+      widget-factory-tracking.md
       memsync-active.md
       ...               generated: one file per ### section
 ```

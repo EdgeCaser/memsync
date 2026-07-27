@@ -140,7 +140,7 @@ def describe(section: Section, max_chars: int = 140) -> str:
     first = next((b for b in section.bullets), "")
     text = re.sub(r"^[-*+]\s+", "", first)
     # Backticks and asterisks only. Underscores are identifiers far more often
-    # than emphasis here (seattle_love_letter, claude_code, SESSION_HANDOFF.md),
+    # than emphasis here (snake_case repo names, claude_code, SESSION_HANDOFF.md),
     # and stripping them silently rewrites paths into ones that do not exist.
     text = re.sub(r"[*`]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
