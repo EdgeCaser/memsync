@@ -546,6 +546,13 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
     was chrome-devtools, playwright and slack, spawned per harvest chunk to do
     a text summarisation.
 
+    Measured on the Pi, interleaved A/B, 5 pairs: the flag avoids ~9 server
+    processes per call (peak 21 without vs 13 with, against a 12 baseline) but
+    does NOT make calls faster — medians 4.76s without vs 5.20s with, a
+    difference well inside the run-to-run spread. The servers start
+    concurrently and never blocked the response. This is resource hygiene on a
+    shared always-on host, not a speedup; do not sell it as one.
+
     The model is pinned via config (default haiku/low) so merges never
     inherit an expensive default model from the user's CLI settings.
     """
