@@ -3,7 +3,7 @@ import subprocess
 import pytest
 
 from memsync import store
-from memsync.cli import cmd_project, cmd_store, cmd_store_conflicts
+from memsync.cli import _snapshot_store, cmd_project, cmd_store, cmd_store_conflicts
 from memsync.config import Config
 
 
@@ -182,3 +182,104 @@ class TestProjectCommand:
         (legacy / "CLAUDE_CORE.md").write_text("stale", encoding="utf-8")
         cmd_project(_args(dry_run=False, force=False), config)
         assert not legacy.exists()
+
+
+def _run_git(root, *args):
+    subprocess.run(
+        ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
+    )
+
+
+@pytest.fixture
+def store_with_remote(store_config, tmp_path):
+    """A store with an origin it shares with a second machine."""
+    config, root = store_config
+    config = Config(**{**config.__dict__, "git_enabled": True, "git_autosync": True})
+    store.init_repo(root)
+    bare = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(bare)], check=True, capture_output=True, text=True
+    )
+    branch = store.status(root).branch
+    _run_git(root, "remote", "add", "origin", str(bare))
+    _run_git(root, "push", "-u", "origin", branch)
+    return config, root, bare, branch
+
+
+def _other_machine_pushes(bare, tmp_path, branch, name, text):
+    """A commit that reaches origin from somewhere other than this store."""
+    clone = tmp_path / f"other-{name}"
+    subprocess.run(
+        ["git", "clone", str(bare), str(clone)], check=True, capture_output=True, text=True
+    )
+    (clone / name).write_text(text, encoding="utf-8")
+    _run_git(clone, "add", "-A")
+    _run_git(
+        clone, "-c", "user.email=other@localhost", "-c", "user.name=other",
+        "commit", "-m", "the other machine wrote this",
+    )
+    _run_git(clone, "push", "origin", branch)
+
+
+@needs_git
+@pytest.mark.smoke
+class TestAutosyncOrder:
+    def test_pulls_remote_work_that_a_local_write_would_have_blocked(
+        self, store_with_remote, tmp_path, capsys
+    ):
+        # The store is dirty by definition when this runs — a memory write just
+        # landed. `git pull --rebase` refuses over unstaged changes, so pulling
+        # before committing meant never pulling at all: every machine only ever
+        # pushed, and the divergence surfaced later as a rejected push.
+        config, root, bare, branch = store_with_remote
+        _other_machine_pushes(bare, tmp_path, branch, "from-other.md", "remote work\n")
+        (root / "GLOBAL_MEMORY.md").write_text("### Project one\n- local\n", encoding="utf-8")
+
+        _snapshot_store(config, root, "memsync: harvest")
+
+        assert "pull skipped" not in capsys.readouterr().err
+        assert (root / "from-other.md").exists()
+        st = store.status(root)
+        assert (st.ahead, st.behind, st.dirty) == (0, 0, False)
+
+    def test_pushes_a_backlog_left_by_an_earlier_failure(self, store_with_remote):
+        # A push that failed while the network was down leaves the machine
+        # ahead. Gating the push on "did this run commit anything" stranded that
+        # commit until some later run happened to write.
+        config, root, _, _ = store_with_remote
+        (root / "GLOBAL_MEMORY.md").write_text("- unpushed\n", encoding="utf-8")
+        store.snapshot(root, "memsync: an earlier write")
+        assert store.status(root).ahead == 1
+
+        _snapshot_store(config, root, "memsync: dedup")
+
+        assert store.status(root).ahead == 0
+
+    def test_a_failed_pull_stops_the_push(self, store_with_remote, tmp_path, capsys):
+        # Pushing over a divergence git could not rebase would be rejected
+        # anyway; reporting the pull failure once is clearer than reporting both.
+        config, root, bare, branch = store_with_remote
+        _other_machine_pushes(bare, tmp_path, branch, "GLOBAL_MEMORY.md", "theirs\n")
+        (root / "GLOBAL_MEMORY.md").write_text("ours\n", encoding="utf-8")
+
+        _snapshot_store(config, root, "memsync: harvest")
+
+        captured = capsys.readouterr()
+        assert "pull skipped" in captured.err
+        assert "pushed" not in captured.out
+        assert not (root / ".git" / "rebase-merge").exists()
+
+    def test_manual_sync_commits_hand_edits_before_pulling(
+        self, store_with_remote, tmp_path, capsys
+    ):
+        # `store sync` is the command someone runs after editing the memory by
+        # hand, which is exactly the state that blocks a rebase.
+        config, root, bare, branch = store_with_remote
+        _other_machine_pushes(bare, tmp_path, branch, "from-other.md", "remote work\n")
+        (root / "GLOBAL_MEMORY.md").write_text("- edited by hand\n", encoding="utf-8")
+
+        assert cmd_store(_args(store_command="sync"), config) == 0
+
+        assert (root / "from-other.md").exists()
+        st = store.status(root)
+        assert (st.ahead, st.behind, st.dirty) == (0, 0, False)

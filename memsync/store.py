@@ -3,7 +3,7 @@ Git-backed history and cross-machine reconciliation for the memory store.
 
 This is deliberately *not* a provider. `BaseProvider` answers one question —
 where is the sync root on this machine — and git does not answer it. Git is a
-mechanism wrapped around writes: pull before, commit after, and a real merge
+mechanism wrapped around writes: commit the write, pull, push, and a real merge
 instead of a silent fork when two machines disagree.
 
 What it replaces:

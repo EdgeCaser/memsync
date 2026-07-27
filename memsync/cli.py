@@ -1127,22 +1127,36 @@ def _snapshot_store(config: Config, memory_root: Path, message: str) -> None:
 
     Best-effort by design: the memory write has already happened and succeeded,
     so a bookkeeping failure is reported, not raised.
+
+    Commit, then pull, then push. The order is not cosmetic: this runs directly
+    after a memory write, so the store is dirty every time, and `git pull
+    --rebase` refuses to run over unstaged changes. Pulling first therefore
+    never pulled — each machine only ever pushed, and the divergence surfaced
+    days later as a rejected push nobody was watching for.
     """
     if not config.git_enabled:
         return
     from memsync import store
 
-    if config.git_autosync:
-        try:
-            store.pull(memory_root)
-        except store.StoreError as exc:
-            print(f"  store: pull skipped — {exc}", file=sys.stderr)
-
     commit = store.snapshot(memory_root, message)
     if commit:
         print(f"  store: committed {commit}")
 
-    if config.git_autosync and commit:
+    if not config.git_autosync:
+        return
+
+    try:
+        store.pull(memory_root)
+    except store.StoreError as exc:
+        # A push over a divergence git could not rebase would be rejected
+        # anyway. One clear failure beats two.
+        print(f"  store: pull skipped — {exc}", file=sys.stderr)
+        return
+
+    # Not gated on `commit`: a push that failed earlier — network down, remote
+    # unreachable — leaves this machine ahead with nothing new to commit, and
+    # gating here stranded that work until some later run happened to write.
+    if store.status(memory_root).ahead:
         try:
             print(f"  store: {store.push(memory_root)}")
         except store.StoreError as exc:
@@ -1181,10 +1195,13 @@ def cmd_store(args: argparse.Namespace, config: Config) -> int:
                   file=sys.stderr)
             return 1
         try:
-            print(f"  {store.pull(memory_root)}")
+            # Commit first for the same reason autosync does: this is the
+            # command someone runs after hand-editing the memory, and a rebase
+            # will not start over uncommitted changes.
             commit = store.snapshot(memory_root, "memsync: manual sync")
             if commit:
                 print(f"  committed {commit}")
+            print(f"  {store.pull(memory_root)}")
             print(f"  {store.push(memory_root)}")
         except store.StoreError as exc:
             print(f"Error: {exc}", file=sys.stderr)
