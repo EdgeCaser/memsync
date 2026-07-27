@@ -95,6 +95,73 @@ class TestEnforceHardConstraints:
         result = enforce_hard_constraints(old, new)
         assert "Keep this" in result
 
+    def test_does_not_resurrect_extended_constraint(self):
+        # The model appended qualifiers to an existing rule. That is a rewrite,
+        # not a deletion — the original must not come back beside it, or the
+        # pair ratchets on every subsequent harvest.
+        old = "# Memory\n\n## Hard constraints\n- Never run `foo --reset` as a recovery step\n"
+        new = (
+            "# Memory\n\n## Hard constraints\n"
+            "- Never run `foo --reset` as a recovery step — it corrupts daemon "
+            "state; prefer a service restart or full reboot\n"
+        )
+        result = enforce_hard_constraints(old, new)
+        assert result.count("Never run `foo --reset`") == 1
+        assert "corrupts daemon state" in result
+
+    def test_does_not_resurrect_reworded_long_constraint(self):
+        # Rewording is only recognised on long bullets, where a single changed
+        # token cannot be the whole difference between two unrelated rules.
+        base = (
+            "Always back up the memory file before {} to disk, because the merge "
+            "step is destructive and a partial write leaves the hot layer in a "
+            "state no later harvest can reconstruct from the archive alone"
+        )
+        old = f"# Memory\n\n## Hard constraints\n- {base.format('writing')}\n"
+        new = f"# Memory\n\n## Hard constraints\n- {base.format('any write')}\n"
+        result = enforce_hard_constraints(old, new)
+        assert _extract_constraints(result) == [f"- {base.format('any write')}"]
+
+    def test_short_bullets_never_retired_by_similarity_alone(self):
+        # Same sentence, different platform: 0.87 similar but distinct rules.
+        old = (
+            "# Memory\n\n## Hard constraints\n"
+            "- Never post to Bluesky without explicit approval\n"
+        )
+        new = (
+            "# Memory\n\n## Hard constraints\n"
+            "- Never post to LinkedIn without explicit approval\n"
+        )
+        result = enforce_hard_constraints(old, new)
+        assert "Bluesky" in result
+        assert "LinkedIn" in result
+
+    def test_still_restores_genuinely_dropped_constraint(self):
+        # Supersession must not become a hole in the append-only guarantee:
+        # a constraint with no surviving equivalent still comes back.
+        old = (
+            "# Memory\n\n## Hard constraints\n"
+            "- Never run `foo --reset` as a recovery step\n"
+            "- Backups before every write\n"
+        )
+        new = (
+            "# Memory\n\n## Hard constraints\n"
+            "- Never run `foo --reset` as a recovery step — it corrupts daemon state\n"
+        )
+        result = enforce_hard_constraints(old, new)
+        assert "Backups before every write" in result
+
+    def test_distinct_constraints_are_not_treated_as_superseded(self):
+        # Same shape, different subject — neither covers the other.
+        old = (
+            "# Memory\n\n## Hard constraints\n"
+            "- Never post to Bluesky without explicit approval\n"
+            "- Never post to LinkedIn without explicit approval\n"
+        )
+        new = "# Memory\n\n## Hard constraints\n- Never post to Bluesky without explicit approval\n"
+        result = enforce_hard_constraints(old, new)
+        assert "LinkedIn" in result
+
 
 @pytest.mark.smoke
 class TestLoadOrInitMemory:
@@ -496,6 +563,28 @@ class TestMergeCandidatesMalformed:
         assert result["malformed"] is True
 
 
+# Each short bullet here is genuinely covered by a longer one in the same file,
+# so the coverage gate permits its removal. SAMPLE_MEMORY has no such pairs —
+# marking one of its bullets is an *uncovered* removal, which the gate refuses.
+DUPE_MEMORY = """\
+<!-- memsync v0.2 -->
+# Global Memory
+
+## Current priorities
+- Finish memsync
+- Finish memsync before the end of the quarter, ahead of the provider work
+
+## Hard constraints
+- Always backup before writing
+- Always backup before writing, without exception, including dry runs
+- Never rewrite from scratch
+
+## Standing preferences
+- Concise output
+- Concise output, with no preamble and no restating of the question
+"""
+
+
 class TestSemanticDedupeMemory:
     # Contract: the model returns the verbatim text of bullets to REMOVE, one per
     # line, or "NONE". Python does the removal — so stray commentary that doesn't
@@ -510,9 +599,31 @@ class TestSemanticDedupeMemory:
         # Model marks one bullet (verbatim) for removal.
         with patch("memsync.llm.call_llm",
                    return_value=self._llm_result("- Always backup before writing")):
-            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
-        assert "Always backup before writing" not in result
+            result = semantic_dedupe_memory(DUPE_MEMORY, config)
+        assert "- Always backup before writing\n" not in result
+        assert "including dry runs" in result
         assert "Never rewrite from scratch" in result
+
+    def test_skips_removal_no_surviving_bullet_covers(self):
+        # The model marked a bullet that is not a duplicate of anything. Removing
+        # it would silently drop the only copy of that rule, so Python declines.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        with patch("memsync.llm.call_llm",
+                   return_value=self._llm_result("- Never rewrite from scratch")):
+            result = semantic_dedupe_memory(DUPE_MEMORY, config)
+        assert result == DUPE_MEMORY
+
+    def test_skips_removal_of_the_longer_of_a_pair(self):
+        # Real failure seen on the live memory file: the model proposed keeping
+        # the abbreviated form of a rule and deleting the fuller one, dropping
+        # its qualifiers. The shorter survivor does not cover it, so it stands.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        longer = "- Always backup before writing, without exception, including dry runs"
+        with patch("memsync.llm.call_llm", return_value=self._llm_result(longer)):
+            result = semantic_dedupe_memory(DUPE_MEMORY, config)
+        assert "including dry runs" in result
 
     def test_none_returns_byte_identical(self):
         from memsync.sync import semantic_dedupe_memory
@@ -548,23 +659,33 @@ class TestSemanticDedupeMemory:
         # If the model marks more than half the bullets, refuse — something is wrong.
         from memsync.sync import semantic_dedupe_memory
         config = Config()
-        every_bullet = "\n".join(
-            ln.strip() for ln in SAMPLE_MEMORY.splitlines()
-            if ln.strip() and ln.strip()[0] in "-*+"
+        # One umbrella bullet covers six short ones, so every proposed removal
+        # clears the coverage gate and the bulk cap is what actually trips.
+        # (Marking *every* bullet cannot reach the cap: with no survivors left,
+        # the gate blocks all of them first.)
+        umbrella = (
+            "- Always back up alpha bravo charlie delta echo foxtrot "
+            "before writing to disk, without exception"
         )
-        with patch("memsync.llm.call_llm", return_value=self._llm_result(every_bullet)):
+        shorts = [
+            f"- Always back up {word} before writing"
+            for word in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot")
+        ]
+        text = "# Memory\n\n## Hard constraints\n" + "\n".join([umbrella, *shorts]) + "\n"
+        with patch("memsync.llm.call_llm",
+                   return_value=self._llm_result("\n".join(shorts))):
             with pytest.raises(ValueError, match="implausible"):
-                semantic_dedupe_memory(SAMPLE_MEMORY, config)
+                semantic_dedupe_memory(text, config)
 
     def test_removal_preserves_trailing_newline(self):
         from memsync.sync import semantic_dedupe_memory
         config = Config()
-        assert SAMPLE_MEMORY.endswith("\n")
+        assert DUPE_MEMORY.endswith("\n")
         with patch("memsync.llm.call_llm",
                    return_value=self._llm_result("- Concise output")):
-            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
+            result = semantic_dedupe_memory(DUPE_MEMORY, config)
         assert result.endswith("\n")
-        assert "Concise output" not in result
+        assert "- Concise output\n" not in result
         # Structure survives: headings and blank-line spacing are preserved,
         # only the marked bullet is gone.
         assert "## Standing preferences" in result
@@ -577,9 +698,9 @@ class TestSemanticDedupeMemory:
         # every blank line in the file would be stripped, collapsing the layout.
         from memsync.sync import semantic_dedupe_memory
         config = Config()
-        blank_count_before = SAMPLE_MEMORY.count("\n\n")
+        blank_count_before = DUPE_MEMORY.count("\n\n")
         response = "- Finish memsync\n\n- some note that is not a real bullet"
         with patch("memsync.llm.call_llm", return_value=self._llm_result(response)):
-            result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
-        assert "- Finish memsync" not in result
+            result = semantic_dedupe_memory(DUPE_MEMORY, config)
+        assert "- Finish memsync\n" not in result
         assert result.count("\n\n") == blank_count_before

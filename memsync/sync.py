@@ -288,7 +288,7 @@ Find sets of bullets that duplicate each other's meaning. Within each set, choos
 RULES:
 - Only mark a bullet when it truly duplicates another bullet's meaning. When unsure, do not mark it.
 - Never mark bullets that express related but distinct policies (e.g. the same kind of rule for two different platforms, tools, or environments).
-- In a "Hard constraints" or "Constraints" section, mark a bullet only if another bullet in that same section states the identical rule.
+- In a "Hard constraints" or "Constraints" section, mark a bullet only when another bullet in that same section fully covers it: it states the same rule, and everything the marked bullet says is also said by the bullet you keep. Restatements of one rule that grew over time — each copy repeating the earlier wording and appending further qualifiers, examples, or dates — are covered by the longest copy. Mark all but that longest one. Removing them loses no rule, because the surviving bullet is a superset.
 - Never mark headings, blank lines, or non-bullet content.
 
 OUTPUT CONTRACT — output ONLY this, nothing else:
@@ -338,6 +338,29 @@ def semantic_dedupe_memory(content: str, config: Config) -> str:
         for ln in response.splitlines()
         if ln.strip() in file_bullets
     }
+    # Coverage gate: only retire a bullet whose content some *surviving* bullet
+    # still carries. The model is asked to keep the longest variant of a rule,
+    # but it does not do so reliably — on a real file it proposed keeping the
+    # shortened form of several rules and deleting the fuller one, quietly
+    # dropping qualifiers. Python decides, per this module's design: an
+    # unverifiable removal is skipped, not trusted.
+    if to_remove:
+        survivors = [
+            (n, set(n.split()))
+            for n in (_normalize_bullet(b) for b in file_bullets if b not in to_remove)
+            if n
+        ]
+        uncovered = {b for b in to_remove if not _constraint_is_superseded(b, survivors)}
+        if uncovered:
+            logger.info(
+                "semantic dedupe: skipping %d of %d proposed removals — no surviving "
+                "bullet covers them",
+                len(uncovered), len(to_remove),
+            )
+            for b in sorted(uncovered):
+                logger.debug("semantic dedupe: kept (uncovered) %s", b[:120])
+            to_remove -= uncovered
+
     if not to_remove:
         # Byte-identical: no spurious diff on a clean file (preserves trailing newline).
         return content
@@ -970,16 +993,76 @@ def _deduplicate_memory(content: str, fuzzy: bool = False) -> str:
     return "\n".join(result)
 
 
+# Below this normalized length, similarity cannot distinguish a rewrite from a
+# distinct rule, so only word-containment may retire a constraint.
+_REWORD_MIN_CHARS = 200
+
+
+def _constraint_is_superseded(old_line: str, new_normalized: list[tuple[str, set[str]]]) -> bool:
+    """
+    True if some surviving constraint already carries this one's rule.
+
+    Two ways that happens:
+      1. Extended — a surviving bullet is at least as long and contains
+         essentially all of this bullet's words (the model appended new
+         qualifiers to an existing rule rather than adding a fresh one).
+      2. Reworded — very high overall similarity to a surviving bullet.
+
+    Exact-string matching alone cannot see either case, which is how the same
+    rule accumulated 23 near-identical copies in one Hard constraints section:
+    every model rewrite looked like a deletion, so its ancestor was resurrected
+    beside it and the pair ratcheted on every subsequent harvest.
+
+    The rewording test is restricted to long bullets on purpose. On a short one
+    a single distinctive token is the entire difference between two unrelated
+    rules — "never post to Bluesky without approval" and the same sentence with
+    "LinkedIn" score 0.87 — so similarity alone cannot tell a rewrite from a
+    genuinely separate constraint. Getting this wrong in one direction leaves a
+    stale duplicate; in the other it silently deletes a hard constraint. Below
+    the length floor we accept the duplicate.
+    """
+    import difflib
+    norm = _normalize_bullet(old_line)
+    if not norm:
+        return False
+    tokens = set(norm.split())
+    if not tokens:
+        return False
+    for cand_norm, cand_tokens in new_normalized:
+        if len(cand_norm) >= len(norm) and len(tokens & cand_tokens) / len(tokens) >= 0.90:
+            return True
+        if (
+            len(norm) >= _REWORD_MIN_CHARS
+            and difflib.SequenceMatcher(None, norm, cand_norm).ratio() >= 0.85
+        ):
+            return True
+    return False
+
+
 def enforce_hard_constraints(old: str, new: str) -> str:
     """
     Re-append any hard constraint lines the model dropped.
     Hard constraints are append-only by design — they must never be lost
     through compaction. This is enforced in Python, not by prompt alone.
+
+    A constraint the model *rewrote* is not a dropped constraint. Only lines
+    with no surviving equivalent are re-appended; see _constraint_is_superseded.
     """
     old_constraints = _extract_constraints(old)
     new_constraints = _extract_constraints(new)
+    new_exact = set(new_constraints)
 
-    dropped = [line for line in old_constraints if line not in new_constraints]
+    surviving = [
+        (n, set(n.split()))
+        for n in (_normalize_bullet(line) for line in new_constraints)
+        if n
+    ]
+
+    dropped = [
+        line
+        for line in old_constraints
+        if line not in new_exact and not _constraint_is_superseded(line, surviving)
+    ]
     if not dropped:
         return new
 
