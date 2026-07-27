@@ -190,6 +190,13 @@ class Config:
     # from GLOBAL_MEMORY.md, so per-project detail stops being resident context.
     projection_enabled: bool = False
     core_max_chars: int = 30000              # enforced budget on the generated core
+    # Generated output is machine-local: it names absolute paths and every
+    # machine rebuilds it, so keeping it in the synced store would both break
+    # the paths elsewhere and make the files ping-pong between machines.
+    projection_root: Path | None = None      # None = ~/.claude/memsync
+    skill_enabled: bool = True               # emit the on-demand memory skill
+    skill_name: str = "memsync-memory"
+    skill_root: Path | None = None           # None = ~/.claude/skills/<skill_name>
 
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
@@ -327,6 +334,15 @@ class Config:
             harvest_append_only_cold=core.get("harvest_append_only_cold", True),
             projection_enabled=core.get("projection_enabled", False),
             core_max_chars=core.get("core_max_chars", 30000),
+            projection_root=(
+                Path(core["projection_root"]).expanduser()
+                if core.get("projection_root") else None
+            ),
+            skill_enabled=core.get("skill_enabled", True),
+            skill_name=core.get("skill_name", "memsync-memory"),
+            skill_root=(
+                Path(core["skill_root"]).expanduser() if core.get("skill_root") else None
+            ),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -368,6 +384,8 @@ class Config:
             f"harvest_append_only_cold = {str(self.harvest_append_only_cold).lower()}",
             f"projection_enabled = {str(self.projection_enabled).lower()}",
             f"core_max_chars = {self.core_max_chars}",
+            f"skill_enabled = {str(self.skill_enabled).lower()}",
+            f'skill_name = "{self.skill_name}"',
         ]
         if self.api_key:
             lines.append(f'api_key = "{self.api_key}"')

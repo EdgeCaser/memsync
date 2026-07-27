@@ -5,6 +5,7 @@ import dataclasses
 import difflib
 import logging
 import platform
+import shutil
 import sys
 from pathlib import Path
 
@@ -87,12 +88,11 @@ def _sync_instruction_targets(memory_path: Path, config: Config) -> None:
             topics_path,
             write_projection,
         )
-        memory_root = memory_path.parent
         projection = build_projection(
-            memory_path.read_text(encoding="utf-8"), config, topics_path(memory_root)
+            memory_path.read_text(encoding="utf-8"), config, topics_path(config)
         )
-        write_projection(projection, memory_root)
-        source = core_path(memory_root)
+        write_projection(projection, config)
+        source = core_path(config)
 
     sync_instruction_targets(source, [path for _, path in _instruction_targets(config)])
 
@@ -1118,9 +1118,12 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
 def cmd_project(args: argparse.Namespace, config: Config) -> int:
     """Generate the always-resident core and on-demand topic files."""
     from memsync.projection import (
+        CORE_DIRNAME,
         build_projection,
+        build_skill_description,
         check_budget,
         core_path,
+        skill_root,
         topics_path,
         write_projection,
     )
@@ -1135,7 +1138,7 @@ def cmd_project(args: argparse.Namespace, config: Config) -> int:
         return 3
 
     original = global_memory.read_text(encoding="utf-8")
-    projection = build_projection(original, config, topics_path(memory_root))
+    projection = build_projection(original, config, topics_path(config))
 
     orig_chars = len(original)
     print(
@@ -1144,6 +1147,12 @@ def cmd_project(args: argparse.Namespace, config: Config) -> int:
         f"Topics:     {len(projection.topics)} file(s), "
         f"{sum(len(t.content) for t in projection.topics):,} chars moved out of context"
     )
+    if config.skill_enabled:
+        desc = build_skill_description(projection.topics)
+        print(
+            f"Skill:      {config.skill_name}, routing description "
+            f"{len(desc):,}/1,536 chars (the only part resident at session start)"
+        )
     if orig_chars:
         pct = 100 * (orig_chars - projection.core_chars) / orig_chars
         print(f"Resident context reduced by {pct:.0f}%.")
@@ -1176,10 +1185,20 @@ def cmd_project(args: argparse.Namespace, config: Config) -> int:
         )
         return 1
 
-    written = write_projection(projection, memory_root)
+    written = write_projection(projection, config)
     print(f"\nWrote {len(written)} file(s):")
-    print(f"  {core_path(memory_root)}")
-    print(f"  {topics_path(memory_root) / '*.md'}  ({len(projection.topics)} topics)")
+    print(f"  {core_path(config)}")
+    print(f"  {topics_path(config) / '*.md'}  ({len(projection.topics)} topics)")
+    if config.skill_enabled:
+        print(f"  {skill_root(config) / 'SKILL.md'}")
+
+    # Generated output used to land in the synced store, where its absolute
+    # paths were wrong on every other machine and each rewrite synced back as a
+    # change. Clear the old location so the two copies can't diverge.
+    legacy = memory_root / CORE_DIRNAME
+    if legacy.is_dir():
+        shutil.rmtree(legacy)
+        print(f"  removed legacy synced copy at {legacy}")
 
     if config.projection_enabled:
         _sync_instruction_targets(global_memory, config)

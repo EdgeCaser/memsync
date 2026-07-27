@@ -30,6 +30,11 @@ CORE_DIRNAME = "core"
 TOPICS_DIRNAME = "topics"
 CORE_FILENAME = "CLAUDE_CORE.md"
 
+# Claude Code truncates a skill's description + when_to_use at 1,536 chars in the
+# skill listing. That listing is the only part resident at session start, so it
+# is the real budget for the whole memory index.
+SKILL_DESCRIPTION_CAP = 1536
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _CONSTRAINTS_RE = re.compile(r"^##\s+(Hard constraints|Constraints)\s*$", re.IGNORECASE)
 
@@ -134,7 +139,10 @@ def describe(section: Section, max_chars: int = 140) -> str:
     """
     first = next((b for b in section.bullets), "")
     text = re.sub(r"^[-*+]\s+", "", first)
-    text = re.sub(r"[*_`]", "", text)
+    # Backticks and asterisks only. Underscores are identifiers far more often
+    # than emphasis here (seattle_love_letter, claude_code, SESSION_HANDOFF.md),
+    # and stripping them silently rewrites paths into ones that do not exist.
+    text = re.sub(r"[*`]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return "No summary available."
@@ -204,10 +212,24 @@ def build_projection(hot: str, config: Config, topics_dir: Path | None = None) -
     for section in constraints:
         parts.append(section.text.rstrip())
     if topics:
-        parts.append(_render_index(topics, topics_dir))
+        if config.skill_enabled:
+            # The skill listing carries the index instead, at a fraction of the
+            # resident cost, so the core only needs a pointer.
+            parts.append(_render_pointer(config.skill_name, len(topics)))
+        else:
+            parts.append(_render_index(topics, topics_dir))
 
     core = "\n\n".join(parts).rstrip() + "\n"
     return Projection(core=core, topics=topics, preamble=preamble)
+
+
+def _render_pointer(skill_name: str, count: int) -> str:
+    return (
+        "## Memory index\n\n"
+        f"Detail on {count} active projects and areas is not in this context. "
+        f"It lives in the `{skill_name}` skill — invoke it, or read the topic "
+        "file it names, when one of those areas comes up."
+    )
 
 
 def _render_index(topics: list[Topic], topics_dir: Path | None) -> str:
@@ -227,6 +249,102 @@ def _render_index(topics: list[Topic], topics_dir: Path | None) -> str:
         lines.append(f"- **{topic.title}** — {topic.description}")
         lines.append(f"  `{path}`")
     return "\n".join(lines)
+
+
+def short_title(title: str) -> str:
+    """
+    Title trimmed to its identifying part, for the packed keyword list in the
+    skill description. Drops parentheticals and anything after a dash, which on
+    real titles is status commentary ("Phase 5 in progress (NOT complete)")
+    rather than something a session would search on.
+    """
+    text = re.sub(r"[*_`]", "", title)
+    text = re.sub(r"\([^)]*\)", "", text)
+    text = re.split(r"\s+[—–-]\s+", text)[0]
+    return re.sub(r"\s+", " ", text).strip() or title.strip()
+
+
+def build_skill_description(topics: list[Topic], cap: int = SKILL_DESCRIPTION_CAP) -> str:
+    """
+    The routing text Claude sees at session start. Everything else about this
+    skill costs nothing until it is invoked, so this string is where the whole
+    design either works or doesn't: it has to be enough for Claude to recognise
+    that a question is about one of these areas, within `cap` characters.
+
+    Topics are packed in order and the remainder is counted rather than silently
+    dropped, so a memory that outgrows the cap says so instead of quietly
+    becoming unroutable.
+    """
+    head = (
+        "Long-term memory: standing detail on the user's active projects, "
+        "clients and infrastructure that is deliberately not in CLAUDE.md. "
+        "Use when a session touches any of: "
+    )
+    names = [short_title(t.title) for t in topics]
+    if not names:
+        return head.rstrip().rstrip(":") + " (no topics recorded yet)."
+
+    kept: list[str] = []
+    for i, name in enumerate(names):
+        remaining = len(names) - i - 1
+        # Reserve room for the overflow note before committing to another name.
+        tail = f", and {remaining} more area(s)." if remaining else "."
+        candidate = head + "; ".join([*kept, name]) + tail
+        if len(candidate) > cap:
+            break
+        kept.append(name)
+
+    dropped = len(names) - len(kept)
+    tail = f", and {dropped} more area(s)." if dropped else "."
+    return head + "; ".join(kept) + tail
+
+
+def _yaml_double_quoted(value: str) -> str:
+    """
+    Emit a value as a YAML double-quoted scalar.
+
+    Quoting is not optional here: the description reads naturally as
+    "Long-term memory: standing detail…", and a plain scalar containing ": "
+    parses as a nested mapping, which breaks the frontmatter rather than
+    degrading it. Titles can also carry backslashes (Windows paths), which a
+    double-quoted scalar treats as escapes.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = re.sub(r"\s*\n\s*", " ", escaped)
+    return f'"{escaped}"'
+
+
+def render_skill(projection: Projection, config: Config) -> str:
+    """
+    SKILL.md for the memory skill: frontmatter plus an index of topic files.
+
+    The body stays in context for the rest of the turn once loaded, so it is an
+    index and nothing else. Bodies live in topics/ and are read individually.
+    """
+    description = build_skill_description(projection.topics)
+    lines = [
+        "---",
+        f"name: {config.skill_name}",
+        f"description: {_yaml_double_quoted(description)}",
+        "---",
+        "",
+        _GENERATED_BANNER,
+        "",
+        f"# {config.skill_name}",
+        "",
+        "Each area below has its own file in `topics/`. Read only the ones the "
+        "current task needs.",
+        "",
+    ]
+    for topic in projection.topics:
+        lines.append(f"- `topics/{topic.slug}.md` — **{topic.title}**: {topic.description}")
+    lines += [
+        "",
+        "These files are generated from the user's global memory. To change what "
+        "they say, edit the source memory and re-run `memsync project`; edits "
+        "made here are overwritten.",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def check_budget(projection: Projection, config: Config) -> list[str]:
@@ -254,26 +372,46 @@ def check_budget(projection: Projection, config: Config) -> list[str]:
     return problems
 
 
-def core_path(memory_root: Path) -> Path:
-    return memory_root / CORE_DIRNAME / CORE_FILENAME
-
-
-def topics_path(memory_root: Path) -> Path:
-    return memory_root / CORE_DIRNAME / TOPICS_DIRNAME
-
-
-def write_projection(projection: Projection, memory_root: Path) -> list[Path]:
+def projection_root(config: Config) -> Path:
     """
-    Write the core and topic files, removing any topic file that no longer
-    corresponds to a section. Returns the paths written.
+    Where generated output goes. Machine-local, never the synced store.
+
+    Projection output is derived, disposable, and machine-specific: it names
+    absolute paths and every machine regenerates it from the same source. Put it
+    in the synced store and two things break — the paths are wrong on every
+    other machine, and each machine's rewrite syncs back as a change, so the
+    file ping-pongs. Only GLOBAL_MEMORY.md and MEMORY_ARCHIVE.md need to travel.
+    """
+    if config.projection_root is not None:
+        return Path(config.projection_root).expanduser()
+    return Path.home() / ".claude" / "memsync"
+
+
+def skill_root(config: Config) -> Path:
+    if config.skill_root is not None:
+        return Path(config.skill_root).expanduser()
+    return Path.home() / ".claude" / "skills" / config.skill_name
+
+
+def core_path(config: Config) -> Path:
+    return projection_root(config) / CORE_FILENAME
+
+
+def topics_path(config: Config) -> Path:
+    """Topic files live inside the skill so SKILL.md can name them relatively."""
+    if config.skill_enabled:
+        return skill_root(config) / TOPICS_DIRNAME
+    return projection_root(config) / TOPICS_DIRNAME
+
+
+def _write_topics(projection: Projection, topics_dir: Path) -> list[Path]:
+    """
+    Write topic files and remove any that no longer correspond to a section.
 
     Stale removal is scoped to *.md directly inside topics/ — the directory is
     memsync-owned and regenerated, but the deletion is still kept narrow.
     """
-    core = core_path(memory_root)
-    topics_dir = topics_path(memory_root)
     topics_dir.mkdir(parents=True, exist_ok=True)
-
     written: list[Path] = []
     expected = {f"{t.slug}.md" for t in projection.topics}
 
@@ -285,6 +423,22 @@ def write_projection(projection: Projection, memory_root: Path) -> list[Path]:
     for existing in topics_dir.glob("*.md"):
         if existing.name not in expected:
             existing.unlink()
+    return written
+
+
+def write_projection(projection: Projection, config: Config) -> list[Path]:
+    """Write the core, the topic files, and the skill. Returns paths written."""
+    core = core_path(config)
+    core.parent.mkdir(parents=True, exist_ok=True)
+
+    written = _write_topics(projection, topics_path(config))
+
+    if config.skill_enabled:
+        skill_dir = skill_root(config)
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(render_skill(projection, config), encoding="utf-8")
+        written.append(skill_file)
 
     core.write_text(projection.core, encoding="utf-8")
     written.append(core)
