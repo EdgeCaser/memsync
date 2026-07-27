@@ -50,3 +50,4 @@ harvested.json
 *.swo
 prospect_research.md
 .claude/settings.local*
+SESSION_HANDOFF.md
