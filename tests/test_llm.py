@@ -49,6 +49,16 @@ class TestClaudeCodeBackend:
         assert "--model" not in cmd
         assert "--effort" not in cmd
 
+    def test_loads_no_mcp_servers(self):
+        # `--tools ""` disables built-in tools but does not stop the CLI booting
+        # the user's MCP servers, which it does on every call. On the Pi that
+        # meant each harvest chunk spawned chrome-devtools, playwright and slack
+        # servers to do a text summarisation. --strict-mcp-config limits MCP to
+        # what --mcp-config names, and nothing names anything.
+        cmd = self._run_with_config(Config())
+        assert "--strict-mcp-config" in cmd
+        assert "--mcp-config" not in cmd
+
 
 class TestCodexBackend:
     def test_codex_exec_reads_prompt_from_stdin(self):

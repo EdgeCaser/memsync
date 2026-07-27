@@ -539,7 +539,13 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
     Call Claude via the locally installed `claude --print` CLI.
 
     Uses the Max/Pro subscription — no API key or per-token billing.
-    Tools are disabled so this is a pure text-completion call.
+    Tools and MCP servers are both disabled so this is a pure text-completion
+    call: `--tools ""` covers the built-ins, and `--strict-mcp-config` with no
+    `--mcp-config` leaves the CLI with no MCP servers to start. Without the
+    latter it still boots every server the user has configured — on the Pi that
+    was chrome-devtools, playwright and slack, spawned per harvest chunk to do
+    a text summarisation.
+
     The model is pinned via config (default haiku/low) so merges never
     inherit an expensive default model from the user's CLI settings.
     """
@@ -556,6 +562,7 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
         "--no-session-persistence",
         "--tools",
         "",
+        "--strict-mcp-config",
     ]
     if config.claude_code_model:
         args += ["--model", config.claude_code_model]
