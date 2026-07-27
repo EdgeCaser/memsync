@@ -117,9 +117,25 @@ the largest sections, not a silent write.
    into the core.
 2. **Read path.** Generate `~/.claude/skills/memory/SKILL.md` from the index so
    topic bodies load on demand rather than on request.
-3. **Git store.** A `GitProvider` beside the existing four. Retires the
+3. **Git store.** *Not* a `GitProvider`, as this document originally said —
+   that was a category error. `BaseProvider` answers one question, where is the
+   sync root on this machine, and git does not answer it. Git is a mechanism
+   wrapped around writes, so it lives in `memsync/store.py` above the provider
+   layer: pull before, commit after, merge instead of fork. Retires the
    Syncthing conflict files, the `backups/` directory, and the journal's diff
    storage in favour of real history.
+
+   Git and file-level sync must not both manage the store. Syncthing
+   replicating `.git/` races on the index and packfiles and corrupts the
+   repository, so `store init` refuses while it can see Syncthing markers —
+   checking parent directories too, since the markers sit at the sync folder
+   root while the memory store is a subdirectory of it.
+
+   `.gitattributes` sets `usage.jsonl merge=union`: it is append-only and every
+   machine writes to it, so both sides of a merge are wanted. Structured files
+   are deliberately excluded from that treatment. A real disagreement about
+   `harvested.json` should stop and be resolved, which is the entire point of
+   leaving a tool that forks the file instead.
 4. **Defrag.** Promote the subsumption pass from a manual command to a scheduled
    maintenance step.
 

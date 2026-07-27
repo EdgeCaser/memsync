@@ -73,6 +73,20 @@ class TestInitRepo:
         assert "backups/" in text
         assert "*.sync-conflict-*" in text
 
+    def test_union_merge_for_the_append_only_log(self, memory_root):
+        # Every machine appends to usage.jsonl, so both sides of a merge are
+        # wanted and a conflict would be pure friction.
+        store.init_repo(memory_root)
+        text = (memory_root / ".gitattributes").read_text(encoding="utf-8")
+        assert "usage.jsonl merge=union" in text
+
+    def test_structured_files_are_not_union_merged(self, memory_root):
+        # harvested.json is an index, not a log. Concatenating two versions
+        # would corrupt it; a real disagreement should stop and be resolved.
+        store.init_repo(memory_root)
+        text = (memory_root / ".gitattributes").read_text(encoding="utf-8")
+        assert "harvested.json merge=union" not in text
+
     def test_refuses_inside_a_syncthing_folder(self, memory_root):
         (memory_root.parent / ".stfolder").mkdir()
         with pytest.raises(store.StoreError, match="Syncthing"):
