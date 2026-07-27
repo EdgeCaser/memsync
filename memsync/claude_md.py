@@ -30,6 +30,12 @@ def sync(memory_path: Path, target_path: Path) -> None:
         return
 
     if platform.system() == "Windows":
+        # A symlink pointing somewhere *else* must be cleared first. copy2 opens
+        # the target for writing, which follows the link and overwrites whatever
+        # it points at — so copying the projected core onto a CLAUDE.md still
+        # symlinked to GLOBAL_MEMORY.md would destroy the canonical store.
+        if target_path.is_symlink():
+            target_path.unlink()
         shutil.copy2(memory_path, target_path)
         return
 

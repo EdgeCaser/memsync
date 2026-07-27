@@ -1039,6 +1039,66 @@ def _constraint_is_superseded(old_line: str, new_normalized: list[tuple[str, set
     return False
 
 
+def retire_subsumed_bullets(content: str) -> tuple[str, list[str]]:
+    """
+    Remove bullets whose every word a longer bullet in the same section already
+    carries. Returns (cleaned, retired).
+
+    This is the deterministic counterpart to the LLM dedupe pass, and on real
+    data it is both stronger and safer. Stronger because the accretion pattern
+    that bloats memory — each restatement repeating the last and appending a
+    qualifier — leaves pairwise similarity low (median 0.216 across the 23
+    copies of one rule), so fuzzy matching at 0.85 catches almost none of it.
+    Safer because keeping the longest variant is a property of the algorithm
+    rather than a judgement the model has to get right; asked to choose, the
+    model kept the abbreviated form of several rules and discarded the fuller
+    one.
+
+    Scope resets at each heading, so the same bullet may appear under two
+    sections without either being retired.
+    """
+    lines = content.splitlines()
+    retired: list[str] = []
+    out: list[str] = []
+
+    block: list[tuple[int, str]] = []  # (index into out, bullet text)
+
+    def flush() -> None:
+        if not block:
+            return
+        # Longest first: a survivor must be able to cover what it retires, and
+        # only a longer bullet can. Ties keep the earlier one.
+        order = sorted(block, key=lambda item: (-len(item[1]), item[0]))
+        kept: list[str] = []
+        drop: set[int] = set()
+        for idx, text in order:
+            normalized = [(n, set(n.split())) for n in (_normalize_bullet(k) for k in kept) if n]
+            if _constraint_is_superseded(text, normalized):
+                drop.add(idx)
+                retired.append(text)
+            else:
+                kept.append(text)
+        for idx in drop:
+            out[idx] = None  # type: ignore[call-overload]
+        block.clear()
+
+    for line in lines:
+        if re.match(r"^#{1,6}\s+", line):
+            flush()
+            out.append(line)
+            continue
+        stripped = line.strip()
+        if stripped and stripped[0] in "-*+":
+            block.append((len(out), stripped))
+        out.append(line)
+    flush()
+
+    cleaned = "\n".join(ln for ln in out if ln is not None)
+    if content.endswith("\n"):
+        cleaned += "\n"
+    return cleaned, retired
+
+
 def enforce_hard_constraints(old: str, new: str) -> str:
     """
     Re-append any hard constraint lines the model dropped.

@@ -185,6 +185,12 @@ class Config:
     # (keeps merges fast and makes it impossible to clobber the archive)
     harvest_append_only_cold: bool = True
 
+    # [projection] — progressive disclosure (docs/progressive-disclosure-memory-design.md)
+    # When enabled, instruction targets sync from the generated core rather than
+    # from GLOBAL_MEMORY.md, so per-project detail stops being resident context.
+    projection_enabled: bool = False
+    core_max_chars: int = 30000              # enforced budget on the generated core
+
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
     claude_md_target: Path = None           # set in __post_init__
@@ -319,6 +325,8 @@ class Config:
             archive_in_harvest=core.get("archive_in_harvest", True),
             archive_max_lines_in_prompt=core.get("archive_max_lines_in_prompt", 300),
             harvest_append_only_cold=core.get("harvest_append_only_cold", True),
+            projection_enabled=core.get("projection_enabled", False),
+            core_max_chars=core.get("core_max_chars", 30000),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -358,6 +366,8 @@ class Config:
             f"archive_in_harvest = {str(self.archive_in_harvest).lower()}",
             f"archive_max_lines_in_prompt = {self.archive_max_lines_in_prompt}",
             f"harvest_append_only_cold = {str(self.harvest_append_only_cold).lower()}",
+            f"projection_enabled = {str(self.projection_enabled).lower()}",
+            f"core_max_chars = {self.core_max_chars}",
         ]
         if self.api_key:
             lines.append(f'api_key = "{self.api_key}"')

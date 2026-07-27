@@ -71,7 +71,30 @@ def _instruction_targets(config: Config) -> list[tuple[str, Path]]:
 
 
 def _sync_instruction_targets(memory_path: Path, config: Config) -> None:
-    sync_instruction_targets(memory_path, [path for _, path in _instruction_targets(config)])
+    """
+    Point CLAUDE.md / AGENTS.md at whatever should be resident context.
+
+    With projection enabled that is the generated core, not GLOBAL_MEMORY.md —
+    the whole point being that per-project detail stops being loaded into every
+    session. The projection is rebuilt here so the core can never go stale
+    relative to the source it was derived from.
+    """
+    source = memory_path
+    if config.projection_enabled:
+        from memsync.projection import (
+            build_projection,
+            core_path,
+            topics_path,
+            write_projection,
+        )
+        memory_root = memory_path.parent
+        projection = build_projection(
+            memory_path.read_text(encoding="utf-8"), config, topics_path(memory_root)
+        )
+        write_projection(projection, memory_root)
+        source = core_path(memory_root)
+
+    sync_instruction_targets(source, [path for _, path in _instruction_targets(config)])
 
 
 def _print_instruction_targets(config: Config, prefix: str = "") -> None:
@@ -1092,6 +1115,84 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def cmd_project(args: argparse.Namespace, config: Config) -> int:
+    """Generate the always-resident core and on-demand topic files."""
+    from memsync.projection import (
+        build_projection,
+        check_budget,
+        core_path,
+        topics_path,
+        write_projection,
+    )
+
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+
+    global_memory = memory_root / "GLOBAL_MEMORY.md"
+    if not global_memory.exists():
+        print("Error: GLOBAL_MEMORY.md not found. Run 'memsync init' first.", file=sys.stderr)
+        return 3
+
+    original = global_memory.read_text(encoding="utf-8")
+    projection = build_projection(original, config, topics_path(memory_root))
+
+    orig_chars = len(original)
+    print(
+        f"Hot layer:  {orig_chars:,} chars, {len(original.splitlines())} lines\n"
+        f"Core:       {projection.core_chars:,} chars, {projection.core_lines} lines\n"
+        f"Topics:     {len(projection.topics)} file(s), "
+        f"{sum(len(t.content) for t in projection.topics):,} chars moved out of context"
+    )
+    if orig_chars:
+        pct = 100 * (orig_chars - projection.core_chars) / orig_chars
+        print(f"Resident context reduced by {pct:.0f}%.")
+
+    problems = check_budget(projection, config)
+    for problem in problems:
+        print(f"  ! {problem}", file=sys.stderr)
+    if problems:
+        # Naming the biggest sections is the actionable part — "over budget" on
+        # its own leaves the user guessing at what to cut.
+        print("\n  Largest content in the core:", file=sys.stderr)
+        from memsync.projection import split_sections
+        _, sections = split_sections(projection.core)
+        for section in sorted(sections, key=lambda s: -len(s.text))[:3]:
+            print(f"    {len(section.text):>7,} chars  {section.title}", file=sys.stderr)
+        print(
+            "\n  Try 'memsync dedup --subsumed' first; it retires constraint "
+            "bullets whose rule a longer bullet already states.",
+            file=sys.stderr,
+        )
+
+    if args.dry_run:
+        print("\n[DRY RUN] Nothing written. Re-run without --dry-run to write.")
+        return 1 if problems else 0
+
+    if problems and not args.force:
+        print(
+            "\nRefusing to write an over-budget core. Use --force to write anyway.",
+            file=sys.stderr,
+        )
+        return 1
+
+    written = write_projection(projection, memory_root)
+    print(f"\nWrote {len(written)} file(s):")
+    print(f"  {core_path(memory_root)}")
+    print(f"  {topics_path(memory_root) / '*.md'}  ({len(projection.topics)} topics)")
+
+    if config.projection_enabled:
+        _sync_instruction_targets(global_memory, config)
+        for label, _target in _instruction_targets(config):
+            print(f"  {label} synced ✓")
+    else:
+        print(
+            "\nprojection_enabled is false, so CLAUDE.md still syncs from "
+            "GLOBAL_MEMORY.md.\nEnable with: memsync config set projection_enabled true"
+        )
+    return 0
+
+
 def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
     """Remove duplicate bullet lines from memory layers.
 
@@ -1156,6 +1257,38 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
             f"\nApplied: {orig_lines} → {clean_lines} lines "
             f"({orig_lines - clean_lines} removed)."
         )
+        for label, _target in _instruction_targets(config):
+            print(f"  {label} synced ✓")
+        return 0
+
+    # ── Subsumption pass (deterministic, no LLM) ─────────────────────────────
+    if getattr(args, "subsumed", False):
+        from memsync.backups import backup
+        from memsync.sync import retire_subsumed_bullets
+
+        original = global_memory.read_text(encoding="utf-8")
+        cleaned, retired = retire_subsumed_bullets(original)
+        if not retired:
+            print("No subsumed bullets found.")
+            return 0
+
+        print(f"{len(retired)} bullet(s) are fully covered by a longer bullet:\n")
+        for bullet in retired:
+            print(f"  - {bullet[:150]}")
+        saved = len(original) - len(cleaned)
+        print(
+            f"\n{len(original):,} → {len(cleaned):,} chars ({saved:,} removed), "
+            f"{len(original.splitlines())} → {len(cleaned.splitlines())} lines."
+        )
+
+        if args.dry_run:
+            print("\n[DRY RUN] Nothing written. Re-run without --dry-run to write.")
+            return 0
+
+        backup(global_memory, memory_root / "backups")
+        global_memory.write_text(cleaned, encoding="utf-8")
+        _sync_instruction_targets(global_memory, config)
+        print("\nApplied.")
         for label, _target in _instruction_targets(config):
             print(f"  {label} synced ✓")
         return 0
@@ -1418,6 +1551,7 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         "harvest_chunk_tokens_anthropic",
         "chunk_inter_call_sleep",
         "max_hot_lines", "archive_in_harvest", "archive_max_lines_in_prompt",
+        "projection_enabled", "core_max_chars",
     }
     if key not in valid_keys:
         print(
@@ -1600,6 +1734,26 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
             print(f"Error: max_hot_lines must be >= 10, got {ivalue}.", file=sys.stderr)
             return 1
         config = dataclasses.replace(config, max_hot_lines=ivalue)
+
+    elif key == "projection_enabled":
+        if value.lower() not in ("true", "false"):
+            print(
+                f"Error: projection_enabled must be true or false, got {value!r}.",
+                file=sys.stderr,
+            )
+            return 1
+        config = dataclasses.replace(config, projection_enabled=value.lower() == "true")
+
+    elif key == "core_max_chars":
+        try:
+            ivalue = int(value)
+        except ValueError:
+            print(f"Error: core_max_chars must be an integer, got {value!r}.", file=sys.stderr)
+            return 1
+        if ivalue < 1000:
+            print(f"Error: core_max_chars must be >= 1000, got {ivalue}.", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(config, core_max_chars=ivalue)
 
     elif key == "archive_in_harvest":
         if value.lower() not in ("true", "false"):
@@ -2011,7 +2165,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --semantic: write the changes after showing the diff (default is dry-run).",
     )
+    p_dedup.add_argument(
+        "--subsumed",
+        action="store_true",
+        help=(
+            "Deterministic pass (no LLM): retire bullets whose every word a longer "
+            "bullet in the same section already carries. Always keeps the longest."
+        ),
+    )
     p_dedup.set_defaults(func=cmd_dedup)
+
+    # project
+    p_project = subparsers.add_parser(
+        "project",
+        help="Generate the always-resident core plus on-demand topic files",
+    )
+    p_project.add_argument(
+        "--dry-run", action="store_true", help="Report sizes without writing"
+    )
+    p_project.add_argument(
+        "--force", action="store_true", help="Write even if the core is over budget"
+    )
+    p_project.set_defaults(func=cmd_project)
 
     # prune
     p_prune = subparsers.add_parser("prune", help="Remove old backups")
