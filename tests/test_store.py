@@ -25,14 +25,27 @@ def memory_root(tmp_path):
 
 
 @pytest.fixture
+def no_git_identity(tmp_path, monkeypatch):
+    """
+    A machine that has never had `git config --global user.email` set.
+
+    This is the default on a freshly imaged Pi, a new laptop, and the Windows
+    and Linux GitHub runners — where this exact gap broke every store test
+    while passing locally and on macOS, both of which happen to have an
+    identity configured.
+    """
+    empty = tmp_path / "gitconfig-empty"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty))
+    monkeypatch.delenv("GIT_AUTHOR_EMAIL", raising=False)
+    monkeypatch.delenv("GIT_COMMITTER_EMAIL", raising=False)
+    return empty
+
+
+@pytest.fixture
 def repo(memory_root):
     store.init_repo(memory_root)
-    # Identity is not configured in CI containers; set it locally so commits work.
-    store._git(memory_root, "config", "user.email", "test@example.com")
-    store._git(memory_root, "config", "user.name", "Test")
-    store._git(memory_root, "add", "-A")
-    if store._git(memory_root, "status", "--porcelain"):
-        store._git(memory_root, "commit", "-m", "seed")
     return memory_root
 
 
@@ -102,6 +115,28 @@ class TestInitRepo:
         with pytest.raises(store.StoreError, match="already a git repository"):
             store.init_repo(repo)
 
+    def test_succeeds_with_no_git_identity_on_the_machine(
+        self, memory_root, no_git_identity
+    ):
+        # Without a fallback identity git refuses to commit, leaving a
+        # repository with no commit that init then refuses to re-run.
+        store.init_repo(memory_root)
+        assert store.is_repo(memory_root)
+        assert store._git(memory_root, "rev-list", "--count", "HEAD") == "1"
+
+    def test_identity_is_repo_local_not_global(self, memory_root, no_git_identity):
+        # memsync must not edit anyone's global git config as a side effect.
+        store.init_repo(memory_root)
+        assert store._git(memory_root, "config", "user.email") == "memsync@localhost"
+        assert no_git_identity.read_text(encoding="utf-8") == ""
+
+    def test_existing_identity_is_left_alone(self, memory_root, no_git_identity):
+        no_git_identity.write_text(
+            "[user]\n\temail = real@example.com\n\tname = Real\n", encoding="utf-8"
+        )
+        store.init_repo(memory_root)
+        assert store._git(memory_root, "config", "user.email") == "real@example.com"
+
 
 @needs_git
 @pytest.mark.smoke
@@ -124,6 +159,16 @@ class TestSnapshot:
 
         monkeypatch.setattr(store, "_git", boom)
         assert store.snapshot(repo, "memsync: test") is None
+
+    def test_commits_in_a_clone_with_no_identity(self, memory_root, no_git_identity):
+        # A clone never runs init_repo, so snapshot is the first thing to need
+        # an identity — and it swallows failures, so without this it would
+        # silently never commit.
+        store.init_repo(memory_root)
+        clone = memory_root.parent / "clone"
+        store._git(memory_root, "clone", "--quiet", str(memory_root), str(clone))
+        (clone / "GLOBAL_MEMORY.md").write_text("# Memory\n- changed\n", encoding="utf-8")
+        assert store.snapshot(clone, "memsync: test") is not None
 
     def test_ignored_paths_do_not_produce_commits(self, repo):
         backups = repo / "backups"

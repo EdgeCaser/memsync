@@ -101,6 +101,29 @@ def is_repo(root: Path) -> bool:
     return (root / ".git").exists()
 
 
+def _ensure_identity(root: Path) -> None:
+    """
+    Give the repo a local committer identity if the machine has none.
+
+    git refuses to commit without one, and plenty of machines that would run
+    memsync have never had `git config --global user.email` set — a Pi imaged
+    for one job, a fresh laptop, a CI runner. Without this, `store init` leaves
+    a repository with no commit and then refuses to re-run because the
+    repository now exists, and `snapshot` fails silently forever after.
+
+    Written repo-local on purpose: memsync should not edit anyone's global git
+    config as a side effect of storing memory.
+    """
+    if _git(root, "config", "user.email", check=False):
+        return
+    _git(root, "config", "user.email", "memsync@localhost")
+    _git(root, "config", "user.name", "memsync")
+    logger.info(
+        "no git identity configured on this machine; set a repo-local one for %s "
+        "(override with: git -C %s config user.email you@example.com)", root, root,
+    )
+
+
 def syncthing_markers(root: Path) -> list[str]:
     """
     Syncthing artefacts in or above the store.
@@ -177,6 +200,7 @@ def init_repo(root: Path, allow_syncthing: bool = False) -> list[str]:
     steps: list[str] = []
     _git(root, "init")
     steps.append("initialised repository")
+    _ensure_identity(root)
 
     gitignore = root / ".gitignore"
     if not gitignore.exists():
@@ -210,6 +234,10 @@ def snapshot(root: Path, message: str) -> str | None:
         _git(root, "add", "-A")
         if not _git(root, "status", "--porcelain"):
             return None
+        # A clone never went through init_repo, so it can reach here on a
+        # machine with no identity — and this function swallows failures, which
+        # would mean silently never committing again.
+        _ensure_identity(root)
         _git(root, "commit", "-m", message)
         return _git(root, "rev-parse", "--short", "HEAD")
     except StoreError as exc:
