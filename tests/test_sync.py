@@ -633,6 +633,73 @@ class TestSemanticDedupeMemory:
         # Byte-identical so cmd_dedup shows an empty diff (no spurious churn).
         assert result == SAMPLE_MEMORY
 
+    def test_asks_about_one_section_at_a_time(self):
+        # Recall collapses on a whole file. Given the live 43 KB hot layer the
+        # model reported no duplicates at all; the same prompt over its 17 KB
+        # constraints section alone found thirteen, including six restatements
+        # of one rule. Sectioning also matches what the prompt already asks
+        # for, which reasons about duplicates "in that same section".
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        content = (
+            "## Alpha\n- alpha one\n- alpha one with more detail\n\n"
+            "## Beta\n- beta one\n- beta one with more detail\n"
+        )
+        seen: list[str] = []
+
+        def _fake(system, user, prefill, config):  # noqa: ARG001
+            seen.append(user)
+            return self._llm_result("NONE")
+
+        with patch("memsync.llm.call_llm", side_effect=_fake):
+            semantic_dedupe_memory(content, config)
+
+        assert len(seen) == 2, "expected one call per section"
+        assert "## Alpha" in seen[0] and "## Beta" not in seen[0]
+        assert "## Beta" in seen[1] and "## Alpha" not in seen[1]
+
+    def test_collects_removals_from_every_section(self):
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        content = (
+            "## Alpha\n- alpha one\n- alpha one with more detail\n\n"
+            "## Beta\n- beta one\n- beta one with more detail\n"
+        )
+
+        def _fake(system, user, prefill, config):  # noqa: ARG001
+            marked = "- alpha one" if "## Alpha" in user else "- beta one"
+            return self._llm_result(marked)
+
+        with patch("memsync.llm.call_llm", side_effect=_fake):
+            result = semantic_dedupe_memory(content, config)
+
+        assert "- alpha one\n" not in result
+        assert "- beta one\n" not in result
+        assert "alpha one with more detail" in result
+        assert "beta one with more detail" in result
+
+    def test_does_not_ask_about_sections_with_nothing_to_compare(self):
+        # A section holding one bullet cannot contain a duplicate pair, so the
+        # call is pure cost — and on a file with many small sections that is
+        # most of the calls.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        content = (
+            "## Lonely\n- the only bullet here\n\n"
+            "## Crowded\n- a rule\n- a rule with more detail\n"
+        )
+        seen: list[str] = []
+
+        def _fake(system, user, prefill, config):  # noqa: ARG001
+            seen.append(user)
+            return self._llm_result("NONE")
+
+        with patch("memsync.llm.call_llm", side_effect=_fake):
+            semantic_dedupe_memory(content, config)
+
+        assert len(seen) == 1
+        assert "## Crowded" in seen[0]
+
     def test_ignores_nonmatching_commentary(self):
         # The old failure mode: model prepends "No duplicates found…" chatter.
         # Under the new contract it matches no bullet, so it's a harmless no-op.
@@ -645,6 +712,36 @@ class TestSemanticDedupeMemory:
         with patch("memsync.llm.call_llm", return_value=self._llm_result(chatter)):
             result = semantic_dedupe_memory(SAMPLE_MEMORY, config)
         assert result == SAMPLE_MEMORY
+
+    def test_matches_a_bullet_the_model_wrapped_in_list_syntax(self):
+        # Live failure, and the reason the Hard constraints section had never
+        # once been deduped: those bullets use "*   " markers, and the model
+        # returns them re-wrapped as "- *   ...". Exact matching then failed on
+        # every one — 15 proposed removals, 0 matches — while sections using
+        # "- " markers matched fine and looked like the feature worked.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        content = (
+            "## Hard constraints\n"
+            "*   Always backup before writing\n"
+            "*   Always backup before writing, without exception, including dry runs\n"
+        )
+        with patch("memsync.llm.call_llm",
+                   return_value=self._llm_result("- *   Always backup before writing")):
+            result = semantic_dedupe_memory(content, config)
+        assert "*   Always backup before writing\n" not in result
+        assert "including dry runs" in result
+
+    def test_a_wrapped_line_still_cannot_remove_something_absent(self):
+        # Stripping the wrapper must not weaken the guarantee that a removal
+        # names a bullet that really exists.
+        from memsync.sync import semantic_dedupe_memory
+        config = Config()
+        content = "## Hard constraints\n*   A real rule\n*   A real rule with detail\n"
+        with patch("memsync.llm.call_llm",
+                   return_value=self._llm_result("- *   A rule that is not in the file")):
+            result = semantic_dedupe_memory(content, config)
+        assert result == content
 
     def test_ignores_hallucinated_removal(self):
         # A bullet the model invents (not present verbatim) can never remove anything.

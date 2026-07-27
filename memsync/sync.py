@@ -297,10 +297,38 @@ OUTPUT CONTRACT — output ONLY this, nothing else:
 Do not output the file, a summary, or any explanation."""
 
 
+def _dedupe_sections(content: str) -> list[str]:
+    """
+    Split the file at heading boundaries, preamble first.
+
+    Kept deliberately dumb: any `##`/`###` line starts a new chunk, so the split
+    matches what a reader sees and never depends on heading depth being used
+    consistently.
+    """
+    sections: list[list[str]] = [[]]
+    for line in content.splitlines():
+        if line.startswith("## ") or line.startswith("### "):
+            sections.append([])
+        sections[-1].append(line)
+    return ["\n".join(lines) for lines in sections if any(ln.strip() for ln in lines)]
+
+
+def _bullet_count(text: str) -> int:
+    return sum(1 for ln in text.splitlines() if ln.strip() and ln.strip()[0] in "-*+")
+
+
 def semantic_dedupe_memory(content: str, config: Config) -> str:
     """
     Find semantic duplicate bullets via an LLM pass and remove them, returning
     the cleaned content.
+
+    Asked one section at a time, because recall collapses on a whole file. Given
+    the live 43 KB hot layer the model reported no duplicates at all; the same
+    prompt over its 17 KB constraints section alone found thirteen, among them
+    six restatements of a single rule that had grown to 30% of the always-
+    resident context. Sectioning also matches what the prompt already asks for,
+    since its rule for constraints reasons about duplicates "in that same
+    section".
 
     The model does NOT regenerate the file. Earlier that invited it to prepend
     commentary ("No duplicates found…") or react to instruction-like text inside
@@ -313,13 +341,21 @@ def semantic_dedupe_memory(content: str, config: Config) -> str:
     Uses the standard backend waterfall (no Anthropic API spend if codex is primary).
     """
     from memsync.llm import call_llm
-    result = call_llm(
-        system=SEMANTIC_DEDUPE_PROMPT,
-        user=content,
-        prefill="",
-        config=config,
-    )
-    response = result["text"].strip()
+
+    responses: list[str] = []
+    for section in _dedupe_sections(content):
+        # One bullet cannot duplicate anything, and on a file with many small
+        # sections that case is most of the calls.
+        if _bullet_count(section) < 2:
+            continue
+        result = call_llm(
+            system=SEMANTIC_DEDUPE_PROMPT,
+            user=section,
+            prefill="",
+            config=config,
+        )
+        responses.append(result["text"].strip())
+    response = "\n".join(responses)
 
     # Bullet lines actually present in the file, keyed by exact stripped text.
     # (Require a non-empty stripped line — an empty string's first char is ""
@@ -333,11 +369,25 @@ def semantic_dedupe_memory(content: str, config: Config) -> str:
     # Keep only response lines that verbatim-match a real bullet. This discards
     # any preamble, "NONE", or explanation the model adds — a hallucinated or
     # paraphrased line can never remove anything.
-    to_remove = {
-        ln.strip()
-        for ln in response.splitlines()
-        if ln.strip() in file_bullets
-    }
+    #
+    # One wrapper is peeled first. Asked for "one bullet per line", the model
+    # tends to render the list as markdown, returning "- *   Some rule" for a
+    # bullet the file stores as "*   Some rule". That silently defeated the
+    # whole pass on the Hard constraints section, whose bullets use "*   "
+    # markers: 15 proposed removals, 0 matches, reported as "no duplicates
+    # found". Sections using "- " markers were unaffected, so the feature
+    # looked like it worked. Peeling cannot weaken the guarantee — whatever
+    # remains must still name a bullet that exists.
+    to_remove = set()
+    for raw in response.splitlines():
+        line = raw.strip()
+        if line in file_bullets:
+            to_remove.add(line)
+            continue
+        if len(line) > 2 and line[0] in "-*+" and line[1] == " ":
+            unwrapped = line[2:].strip()
+            if unwrapped in file_bullets:
+                to_remove.add(unwrapped)
     # Coverage gate: only retire a bullet whose content some *surviving* bullet
     # still carries. The model is asked to keep the longest variant of a rule,
     # but it does not do so reliably — on a real file it proposed keeping the
