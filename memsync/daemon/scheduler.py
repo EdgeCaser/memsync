@@ -237,26 +237,34 @@ def job_nightly_harvest(config: Config) -> None:
             logger.warning("nightly_harvest: %s — skipping this run", exc)
             return
 
-        # Resolve projects dir — configurable so users can point at a mounted/synced path
-        projects_dir_str = config.daemon.harvest_projects_dir
-        projects_dir = (
-            Path(projects_dir_str).expanduser()
-            if projects_dir_str
-            else Path("~/.claude/projects").expanduser()
-        )
-
-        if not projects_dir.exists():
-            logger.debug("nightly_harvest: projects dir not found at %s, skipping", projects_dir)
+        # Resolve projects roots — configurable so users can point at mounted or
+        # synced paths, and plural because the machine awake at harvest time is
+        # often not the one that produced the transcripts.
+        roots = config.daemon.projects_roots()
+        present = [root for root in roots if root.exists()]
+        if not present:
+            logger.debug(
+                "nightly_harvest: no projects dir found at %s, skipping",
+                ", ".join(str(root) for root in roots),
+            )
             return
+        for root in roots:
+            if not root.exists():
+                logger.info("nightly_harvest: skipping missing projects root %s", root)
 
         # Collect all unharvested sessions across all project subdirectories
         harvested = load_harvested_index(memory_root)
         new_sessions: list[Path] = []
-        for project_dir in sorted(projects_dir.iterdir()):
-            if project_dir.is_dir():
-                for session_path in list_sessions(project_dir):
-                    if session_path.stem not in harvested:
-                        new_sessions.append(session_path)
+        seen_stems: set[str] = set()
+        for root in present:
+            for project_dir in sorted(root.iterdir()):
+                if project_dir.is_dir():
+                    for session_path in list_sessions(project_dir):
+                        if session_path.stem in seen_stems:
+                            continue
+                        seen_stems.add(session_path.stem)
+                        if session_path.stem not in harvested:
+                            new_sessions.append(session_path)
 
         if not new_sessions:
             logger.debug("nightly_harvest: no new sessions to process")

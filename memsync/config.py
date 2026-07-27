@@ -40,6 +40,19 @@ def _coerce_schedule(value: str | list[str]) -> list[str]:
     return list(value) if value else ["55 23 * * *"]
 
 
+def _toml_str_or_list(key: str, value: str | list[str]) -> str:
+    """
+    Render a setting that may hold one value or several.
+
+    A single path stays a quoted string so configs written before the setting
+    accepted a list round-trip unchanged.
+    """
+    if isinstance(value, str):
+        return f'{key} = "{value}"'
+    items = ", ".join(f'"{item}"' for item in value)
+    return f"{key} = [{items}]"
+
+
 def normalize_backends(names: list[str]) -> list[str]:
     """Normalize backend aliases, drop duplicates, and skip disabled entries."""
     normalized: list[str] = []
@@ -128,7 +141,11 @@ class DaemonConfig:
     # Nightly harvest — sweeps ~/.claude/projects/ and extracts memories from session transcripts
     harvest_enabled: bool = True
     harvest_schedule: str = "0 2 * * *"            # 2am daily
-    harvest_projects_dir: str = ""                  # empty = ~/.claude/projects (default)
+    # empty = ~/.claude/projects. Accepts a list of roots as well as a single
+    # path: an always-on host is often the only machine awake at harvest time,
+    # and other machines' transcripts land on it via file sync rather than in
+    # its own ~/.claude/projects.
+    harvest_projects_dir: str | list[str] = ""
     harvest_allow_ollama: bool = False              # unattended local LLM work can run hot
     harvest_max_runtime_seconds: int = 1800          # stop starting new sessions after 30 min
     harvest_max_sessions_per_run: int = 25           # prevent one backlog from monopolizing host
@@ -143,6 +160,29 @@ class DaemonConfig:
     digest_smtp_port: int = 587
     digest_smtp_user: str = ""
     digest_smtp_password: str = ""              # prefer MEMSYNC_SMTP_PASSWORD env var
+
+    def projects_roots(self) -> list[Path]:
+        """
+        Every directory the harvest should sweep for session transcripts.
+
+        Accepts a single path or a list, because the machine that harvests is
+        not always the machine that produced the transcripts. Order is
+        preserved and duplicates are dropped, so a root listed twice — or one
+        that expands to the same place as another — is swept once.
+        """
+        raw = self.harvest_projects_dir
+        entries = [raw] if isinstance(raw, str) else list(raw)
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for entry in entries:
+            if not str(entry).strip():
+                continue
+            path = Path(str(entry)).expanduser()
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                roots.append(path)
+        return roots or [Path("~/.claude/projects").expanduser()]
 
 
 @dataclass
@@ -458,7 +498,7 @@ class Config:
                 f'drift_notify = "{d.drift_notify}"',
                 f"harvest_enabled = {str(d.harvest_enabled).lower()}",
                 f'harvest_schedule = "{d.harvest_schedule}"',
-                f'harvest_projects_dir = "{d.harvest_projects_dir}"',
+                _toml_str_or_list("harvest_projects_dir", d.harvest_projects_dir),
                 f"harvest_allow_ollama = {str(d.harvest_allow_ollama).lower()}",
                 f"harvest_max_runtime_seconds = {d.harvest_max_runtime_seconds}",
                 f"harvest_max_sessions_per_run = {d.harvest_max_sessions_per_run}",

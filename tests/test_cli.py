@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import dataclasses
 import platform
@@ -308,7 +308,7 @@ class TestCmdInit:
     def test_init_returns_4_when_provider_not_found(self, tmp_config, capsys):
         config, tmp_path = tmp_config
         result = cmd_init(self._init_args(provider="onedrive"), config)
-        # OneDrive not present in tmp_path → 4 (detection failed)
+        # OneDrive not present in tmp_path â†’ 4 (detection failed)
         # OR 0 if OneDrive is detected on this machine; just check it ran
         assert result in (0, 4)
 
@@ -786,9 +786,9 @@ class TestCmdHarvest:
         )
 
         assert result == 0
-        # Memory untouched — we deferred instead of harvesting.
+        # Memory untouched â€” we deferred instead of harvesting.
         assert global_memory.read_text(encoding="utf-8") == before
-        # Foreign lock left intact — we deferred, we did not steal a live lock.
+        # Foreign lock left intact â€” we deferred, we did not steal a live lock.
         on_disk = json.loads((memory_root / LOCK_FILENAME).read_text(encoding="utf-8"))
         assert on_disk["host"] == "other-machine"
 
@@ -1107,6 +1107,7 @@ class TestHarvestAll:
         assert result == 0
         assert global_memory.read_text(encoding="utf-8") == updated
 
+
     def test_api_error_increments_errors(self, memory_file, monkeypatch, capsys):
         config, tmp_path, global_memory = memory_file
         memory_root = config.sync_root / ".claude-memory"
@@ -1146,7 +1147,7 @@ class TestHarvestAll:
                         _harvest_args(auto=True), config, memory_root, global_memory,
                     )
 
-        # No error, but truncated session is skipped — memory unchanged
+        # No error, but truncated session is skipped â€” memory unchanged
         original = (
             "<!-- memsync v0.2 -->\n"
             "# Global Memory\n\n"
@@ -1208,6 +1209,100 @@ class TestHarvestAll:
         assert mock_harvest.call_count == 2
 
 
+class TestHarvestAcrossMultipleRoots:
+    """
+    The machine awake at harvest time is often not the one that produced the
+    transcripts. An always-on host receives peers' transcripts through file
+    sync, so the harvest has to sweep more than its own ~/.claude/projects.
+    """
+
+    @staticmethod
+    def _session(root, project, stem):
+        proj = root / project
+        proj.mkdir(parents=True, exist_ok=True)
+        path = proj / f"{stem}.jsonl"
+        path.write_text('{"type":"user","message":{"content":"hi"}}', encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _config_with_roots(config, roots):
+        return dataclasses.replace(
+            config,
+            daemon=dataclasses.replace(
+                config.daemon, harvest_projects_dir=[str(r) for r in roots]
+            ),
+        )
+
+    def _run(self, config, memory_root, global_memory, seen):
+        def _record(transcript, *a, **kw):  # noqa: ARG001
+            seen.append(transcript)
+            return {
+                "updated_content": SAMPLE_MEMORY,
+                "changed": False,
+                "truncated": False,
+                "malformed": False,
+                "input_tokens": 1,
+                "output_tokens": 1,
+            }
+
+        with patch("memsync.cli.harvest_memory_content", side_effect=_record):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("time.sleep"):
+                    return _harvest_all(
+                        _harvest_args(auto=True), config, memory_root, global_memory,
+                    )
+
+    def test_sweeps_every_configured_root(self, memory_file):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        local, synced = tmp_path / "local", tmp_path / "synced"
+        self._session(local, "proj-a", "session-local")
+        self._session(synced, "proj-b", "session-remote")
+
+        seen: list[str] = []
+        cfg = self._config_with_roots(config, [local, synced])
+        assert self._run(cfg, memory_root, global_memory, seen) == 0
+        assert len(seen) == 2
+
+    def test_a_missing_root_does_not_stop_the_others(self, memory_file, capsys):
+        # These roots point at peers. One being offline, or its sync folder not
+        # yet created, must not cost the harvest the roots that are present.
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        local = tmp_path / "local"
+        self._session(local, "proj-a", "session-local")
+
+        seen: list[str] = []
+        cfg = self._config_with_roots(config, [local, tmp_path / "peer-that-is-offline"])
+        assert self._run(cfg, memory_root, global_memory, seen) == 0
+        assert len(seen) == 1
+        assert "Skipping missing projects root" in capsys.readouterr().err
+
+    def test_the_same_session_under_two_roots_is_harvested_once(self, memory_file):
+        # A machine that both writes locally and syncs a copy of itself would
+        # otherwise pay for the same transcript twice.
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        first, second = tmp_path / "first", tmp_path / "second"
+        self._session(first, "proj", "session-dup")
+        self._session(second, "proj", "session-dup")
+
+        seen: list[str] = []
+        cfg = self._config_with_roots(config, [first, second])
+        assert self._run(cfg, memory_root, global_memory, seen) == 0
+        assert len(seen) == 1
+
+    def test_reports_when_no_root_exists(self, memory_file, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        cfg = self._config_with_roots(config, [tmp_path / "nope-one", tmp_path / "nope-two"])
+
+        assert _harvest_all(
+            _harvest_args(auto=False), cfg, memory_root, global_memory,
+        ) == 0
+        out = capsys.readouterr().out
+        assert "nope-one" in out and "nope-two" in out
+
 class TestScheduledHarvestConfig:
     def test_keeps_ollama_when_allowed(self):
         config = Config()
@@ -1219,7 +1314,7 @@ class TestScheduledHarvestConfig:
 
 
 # ---------------------------------------------------------------------------
-# cmd_refresh — additional error paths
+# cmd_refresh â€” additional error paths
 # ---------------------------------------------------------------------------
 
 class TestCmdRefreshErrors:
@@ -1314,13 +1409,13 @@ class TestCmdUsage:
 
 
 # ---------------------------------------------------------------------------
-# cmd_status — additional paths
+# cmd_status â€” additional paths
 # ---------------------------------------------------------------------------
 
 class TestCmdStatusExtras:
     def test_sync_root_not_set_uses_provider(self, memory_file, monkeypatch, capsys):
         config, tmp_path, _ = memory_file
-        # Config without sync_root set — forces provider detection path
+        # Config without sync_root set â€” forces provider detection path
         config_no_root = Config(
             provider="custom",
             sync_root=None,
@@ -1345,7 +1440,7 @@ class TestCmdStatusExtras:
 
 
 # ---------------------------------------------------------------------------
-# cmd_config_set — additional paths
+# cmd_config_set â€” additional paths
 # ---------------------------------------------------------------------------
 
 class TestCmdConfigSetExtras:
@@ -1404,7 +1499,7 @@ class TestCmdConfigSetExtras:
 
 
 # ---------------------------------------------------------------------------
-# cmd_doctor — additional paths
+# cmd_doctor â€” additional paths
 # ---------------------------------------------------------------------------
 
 class TestCmdDoctorExtras:
@@ -1463,7 +1558,7 @@ class TestCmdDoctorExtras:
 
 class TestResolveMemoryRoot:
     def test_unknown_provider_no_sync_root_returns_4(self, tmp_path, capsys):
-        """Unknown provider, no sync_root → KeyError → _require_memory_root returns 4."""
+        """Unknown provider, no sync_root â†’ KeyError â†’ _require_memory_root returns 4."""
         config = Config(
             provider="unknown_provider_xyz",
             sync_root=None,
@@ -1473,7 +1568,7 @@ class TestResolveMemoryRoot:
         assert result == 4
 
     def test_sync_root_set_unknown_provider_falls_back_to_claude_memory(self, tmp_path, capsys):
-        """sync_root set but unknown provider → fallback to .claude-memory subdir."""
+        """sync_root set but unknown provider â†’ fallback to .claude-memory subdir."""
         sync_root = tmp_path / "sync"
         sync_root.mkdir()
         config = Config(
@@ -1481,12 +1576,12 @@ class TestResolveMemoryRoot:
             sync_root=sync_root,
             claude_md_target=tmp_path / ".claude" / "CLAUDE.md",
         )
-        # .claude-memory doesn't exist → returns 2
+        # .claude-memory doesn't exist â†’ returns 2
         result = cmd_show(_args(), config)
         assert result == 2
 
     def test_provider_detect_succeeds_no_sync_root(self, tmp_path, capsys):
-        """Provider detect() returns a path → uses provider.get_memory_root()."""
+        """Provider detect() returns a path â†’ uses provider.get_memory_root()."""
         fake_provider = MagicMock()
         fake_provider.detect.return_value = tmp_path / "cloud"
         fake_provider.get_memory_root.return_value = tmp_path / "cloud" / ".claude-memory"
@@ -1497,13 +1592,13 @@ class TestResolveMemoryRoot:
         )
         with patch("memsync.cli.get_provider", return_value=fake_provider):
             result = cmd_show(_args(), config)
-        # memory_root path doesn't exist → returns 2
+        # memory_root path doesn't exist â†’ returns 2
         assert result == 2
         fake_provider.get_memory_root.assert_called_once_with(tmp_path / "cloud")
 
 
 # ---------------------------------------------------------------------------
-# cmd_refresh — missing memory file paths
+# cmd_refresh â€” missing memory file paths
 # ---------------------------------------------------------------------------
 
 class TestCmdRefreshMemoryPaths:
@@ -1524,7 +1619,7 @@ class TestCmdRefreshMemoryPaths:
 
 
 # ---------------------------------------------------------------------------
-# cmd_diff — missing memory root
+# cmd_diff â€” missing memory root
 # ---------------------------------------------------------------------------
 
 class TestCmdDiffMemoryPath:
@@ -1539,7 +1634,7 @@ class TestCmdDiffMemoryPath:
 
 
 # ---------------------------------------------------------------------------
-# cmd_prune — additional paths
+# cmd_prune â€” additional paths
 # ---------------------------------------------------------------------------
 
 class TestCmdPruneExtras:
@@ -1571,7 +1666,7 @@ class TestCmdPruneExtras:
 
 
 # ---------------------------------------------------------------------------
-# _harvest_all — non-auto mode (print paths, model override, write path)
+# _harvest_all â€” non-auto mode (print paths, model override, write path)
 # ---------------------------------------------------------------------------
 
 class TestHarvestAllNonAuto:
@@ -1723,7 +1818,7 @@ class TestHarvestAllNonAuto:
 
 
 # ---------------------------------------------------------------------------
-# cmd_harvest — interactive confirmation (non-auto mode)
+# cmd_harvest â€” interactive confirmation (non-auto mode)
 # ---------------------------------------------------------------------------
 
 class TestCmdHarvestInteractive:
@@ -1799,7 +1894,7 @@ class TestCmdHarvestInteractive:
 
 
 # ---------------------------------------------------------------------------
-# cmd_harvest — session growth detection
+# cmd_harvest â€” session growth detection
 # ---------------------------------------------------------------------------
 
 class TestCmdHarvestGrowthDetection:
@@ -1864,7 +1959,7 @@ class TestCmdHarvestGrowthDetection:
 
 
 # ---------------------------------------------------------------------------
-# cmd_harvest — BadRequestError non-model re-raise
+# cmd_harvest â€” BadRequestError non-model re-raise
 # ---------------------------------------------------------------------------
 
 class TestCmdHarvestBadRequestNonModel:
@@ -1885,7 +1980,7 @@ class TestCmdHarvestBadRequestNonModel:
 
 
 # ---------------------------------------------------------------------------
-# cmd_init — provider branch and fallback paths
+# cmd_init â€” provider branch and fallback paths
 # ---------------------------------------------------------------------------
 
 def _init_args(**kwargs):
@@ -2005,7 +2100,7 @@ class TestDaemonImportGuardExtras:
 
 
 # ---------------------------------------------------------------------------
-# cmd_daemon_stop — with PID file
+# cmd_daemon_stop â€” with PID file
 # ---------------------------------------------------------------------------
 
 class TestCmdDaemonStopWithPid:
@@ -2055,7 +2150,7 @@ class TestCmdDaemonStopWithPid:
 
 
 # ---------------------------------------------------------------------------
-# cmd_daemon_status — with PID file
+# cmd_daemon_status â€” with PID file
 # ---------------------------------------------------------------------------
 
 class TestCmdDaemonStatusWithPid:
@@ -2112,7 +2207,7 @@ class TestCmdDaemonStatusWithPid:
 
 
 # ---------------------------------------------------------------------------
-# cmd_doctor — additional paths
+# cmd_doctor â€” additional paths
 # ---------------------------------------------------------------------------
 
 class TestCmdDoctorAdditional:
@@ -2136,7 +2231,7 @@ class TestCmdDoctorAdditional:
 
 
 # ---------------------------------------------------------------------------
-# cmd_status — symlink CLAUDE.md
+# cmd_status â€” symlink CLAUDE.md
 # ---------------------------------------------------------------------------
 
 class TestCmdStatusSymlink:

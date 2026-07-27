@@ -577,23 +577,36 @@ def _harvest_all_locked(
     import time
 
     started_at = time.monotonic()
-    projects_dir_str = getattr(config, "daemon", None) and config.daemon.harvest_projects_dir
-    projects_dir = (
-        Path(projects_dir_str).expanduser()
-        if projects_dir_str
-        else Path("~/.claude/projects").expanduser()
-    )
+    daemon = getattr(config, "daemon", None)
+    roots = daemon.projects_roots() if daemon else [Path("~/.claude/projects").expanduser()]
 
-    if not projects_dir.exists():
+    present = [root for root in roots if root.exists()]
+    missing = [root for root in roots if not root.exists()]
+    if not present:
         if not args.auto:
-            print(f"No Claude Code projects directory found at {projects_dir}")
+            where = ", ".join(str(root) for root in roots)
+            print(f"No Claude Code projects directory found at {where}")
         return 0
+    # A root that has gone away is reported, not fatal: these point at synced
+    # copies of other machines' transcripts, and a peer that is offline or a
+    # sync folder that has not appeared yet must not stop the harvest of the
+    # roots that are present.
+    for root in missing:
+        print(f"  Skipping missing projects root {root}", file=sys.stderr)
 
     harvested = load_harvested_index(memory_root)
     new_sessions: list[Path] = []
-    for project_dir in sorted(projects_dir.iterdir()):
-        if project_dir.is_dir():
+    # Session stems are UUIDs, but the same session can appear under two roots
+    # when a machine both writes locally and syncs a copy. Harvest it once.
+    seen_stems: set[str] = set()
+    for root in present:
+        for project_dir in sorted(root.iterdir()):
+            if not project_dir.is_dir():
+                continue
             for session_path in list_sessions(project_dir):
+                if session_path.stem in seen_stems:
+                    continue
+                seen_stems.add(session_path.stem)
                 stored = harvested.get(session_path.stem)
                 if stored is None:
                     new_sessions.append(session_path)

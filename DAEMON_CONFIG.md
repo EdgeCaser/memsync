@@ -42,9 +42,10 @@ class DaemonConfig:
     # Nightly harvest — sweeps ~/.claude/projects/ for new session transcripts
     harvest_enabled: bool = True
     harvest_schedule: str = "0 2 * * *"        # 2am daily
-    harvest_projects_dir: str = ""             # empty = ~/.claude/projects (default)
+    harvest_projects_dir: str | list[str] = ""  # empty = ~/.claude/projects (default)
                                                # set to a custom path on Pi/servers that
-                                               # don't have Claude Code installed locally
+                                               # don't have Claude Code installed locally,
+                                               # or to a LIST of paths to sweep several
 
     # Drift detection
     drift_check_enabled: bool = True
@@ -171,6 +172,37 @@ def _to_toml(self) -> str:
 ```
 
 ---
+
+## Harvesting more than one projects root
+
+`harvest_projects_dir` accepts a list as well as a single path. The machine
+that harvests is often not the machine that produced the transcripts: an
+always-on host is the only one awake at 00:00, while the laptops that did the
+work are asleep. If those transcripts reach the host through file sync, point
+the harvest at each synced root as well as its own:
+
+```toml
+[daemon]
+harvest_projects_dir = [
+    "~/.claude/projects",
+    "~/sync/desktop/.claude/projects",
+    "~/sync/laptop/.claude/projects",
+]
+```
+
+Resolve the setting with `config.daemon.projects_roots()`, never by reading the
+field directly — it returns a de-duplicated list of `Path`s and falls back to
+`~/.claude/projects` when unset.
+
+Behaviour worth knowing:
+
+- A root that does not exist is reported and skipped, not fatal. These paths
+  point at peers, and a machine that is offline or a sync folder that has not
+  appeared yet must not cost you the roots that are present.
+- The same session appearing under two roots is harvested once; sessions are
+  de-duplicated by stem.
+- A single path still serializes back as a string, so configs written before
+  the setting accepted a list round-trip unchanged.
 
 ## Important: SMTP password handling
 

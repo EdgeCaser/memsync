@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from memsync.config import Config, get_config_path
+from memsync.config import Config, DaemonConfig, get_config_path
 
 
 @pytest.mark.smoke
@@ -234,3 +234,44 @@ class TestConfigRoundTrip:
         toml_text = c._to_toml()
         # Forward slashes in path (TOML-safe)
         assert "\\" not in toml_text.split("project_cwd")[1].split("\n")[0]
+
+
+class TestHarvestProjectsRoots:
+    def test_unset_falls_back_to_the_default_location(self):
+        roots = DaemonConfig().projects_roots()
+        assert roots == [Path("~/.claude/projects").expanduser()]
+
+    def test_a_single_string_still_works(self):
+        # The setting predates multi-root support; existing configs hold a
+        # plain string and must keep behaving identically.
+        roots = DaemonConfig(harvest_projects_dir="/srv/transcripts").projects_roots()
+        assert roots == [Path("/srv/transcripts")]
+
+    def test_a_list_gives_every_root_in_order(self):
+        d = DaemonConfig(harvest_projects_dir=["/a", "/b", "/c"])
+        assert d.projects_roots() == [Path("/a"), Path("/b"), Path("/c")]
+
+    def test_blank_and_duplicate_entries_are_dropped(self):
+        d = DaemonConfig(harvest_projects_dir=["/a", "", "/a", "  ", "/b"])
+        assert d.projects_roots() == [Path("/a"), Path("/b")]
+
+    def test_an_all_blank_list_falls_back_rather_than_sweeping_nothing(self):
+        assert DaemonConfig(harvest_projects_dir=["", " "]).projects_roots() == [
+            Path("~/.claude/projects").expanduser()
+        ]
+
+    def test_a_list_round_trips_through_toml(self, tmp_path):
+        import tomllib
+        c = Config()
+        c.daemon.harvest_projects_dir = ["/one", "/two"]
+        parsed = tomllib.loads(c._to_toml())
+        assert parsed["daemon"]["harvest_projects_dir"] == ["/one", "/two"]
+
+    def test_a_single_path_still_serializes_as_a_string(self):
+        # Round-tripping a pre-existing config must not rewrite the value into
+        # a list; that would churn every user's config file on first write.
+        import tomllib
+        c = Config()
+        c.daemon.harvest_projects_dir = "/only"
+        parsed = tomllib.loads(c._to_toml())
+        assert parsed["daemon"]["harvest_projects_dir"] == "/only"
