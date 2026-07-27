@@ -1,0 +1,184 @@
+import subprocess
+
+import pytest
+
+from memsync import store
+from memsync.cli import cmd_project, cmd_store, cmd_store_conflicts
+from memsync.config import Config
+
+
+def _git_available() -> bool:
+    try:
+        subprocess.run(["git", "--version"], capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):  # pragma: no cover
+        return False
+    return True
+
+
+needs_git = pytest.mark.skipif(not _git_available(), reason="git not installed")
+
+
+def _args(**kwargs):
+    class Namespace:
+        pass
+
+    ns = Namespace()
+    for key, value in kwargs.items():
+        setattr(ns, key, value)
+    return ns
+
+
+@pytest.fixture
+def store_config(tmp_path):
+    """A config whose memory root and generated output are both under tmp_path."""
+    root = tmp_path / "sync" / ".claude-memory"
+    root.mkdir(parents=True)
+    (root / "GLOBAL_MEMORY.md").write_text(
+        "### Project one\n- detail one\n\n## Hard constraints\n- Only rule\n",
+        encoding="utf-8",
+    )
+    (root / "MEMORY_ARCHIVE.md").write_text("# Archive\n", encoding="utf-8")
+    return Config(
+        sync_root=tmp_path / "sync",
+        provider="custom",
+        projection_root=tmp_path / "local",
+        skill_root=tmp_path / "skills" / "memsync-memory",
+        claude_md_target=tmp_path / "targets" / "CLAUDE.md",
+        codex_agents_target=tmp_path / "targets" / "AGENTS.md",
+    ), root
+
+
+@pytest.mark.smoke
+class TestStoreStatusCommand:
+    def test_reports_non_repo(self, store_config, capsys):
+        config, _ = store_config
+        assert cmd_store(_args(store_command="status"), config) == 0
+        assert "not a repository" in capsys.readouterr().out
+
+    def test_warns_about_syncthing(self, store_config, capsys):
+        config, root = store_config
+        (root.parent / ".stfolder").mkdir()
+        cmd_store(_args(store_command="status"), config)
+        out = capsys.readouterr().out
+        assert "Syncthing folder" in out
+        assert "corrupts the repository" in out
+
+    def test_warns_about_conflict_files(self, store_config, capsys):
+        config, root = store_config
+        (root / "GLOBAL_MEMORY.sync-conflict-20260715-1-A.md").write_text("x", encoding="utf-8")
+        cmd_store(_args(store_command="status"), config)
+        assert "conflict file(s) present" in capsys.readouterr().out
+
+
+@needs_git
+@pytest.mark.smoke
+class TestStoreInitCommand:
+    def test_initialises(self, store_config, capsys):
+        config, root = store_config
+        assert cmd_store(_args(store_command="init", allow_syncthing=False), config) == 0
+        assert store.is_repo(root)
+        assert "No remote is configured" in capsys.readouterr().out
+
+    def test_refuses_on_syncthing_and_reports_why(self, store_config, capsys):
+        config, root = store_config
+        (root.parent / ".stfolder").mkdir()
+        assert cmd_store(_args(store_command="init", allow_syncthing=False), config) == 1
+        assert not store.is_repo(root)
+        assert "Syncthing" in capsys.readouterr().err
+
+    def test_sync_without_repo_is_an_error(self, store_config, capsys):
+        config, _ = store_config
+        assert cmd_store(_args(store_command="sync"), config) == 1
+        assert "not a git repository" in capsys.readouterr().err
+
+
+@pytest.mark.smoke
+class TestStoreConflictsCommand:
+    def test_reports_nothing_when_clean(self, store_config, capsys):
+        config, _ = store_config
+        assert cmd_store_conflicts(_args(), config) == 0
+        assert "No Syncthing conflict files" in capsys.readouterr().out
+
+    def test_identifies_lines_only_in_the_conflict_copy(self, store_config, capsys):
+        # The question worth answering before deleting a conflict copy is
+        # whether the fork lost anything, not how many copies there are.
+        config, root = store_config
+        (root / "GLOBAL_MEMORY.sync-conflict-20260715-1-A.md").write_text(
+            "### Project one\n- detail one\n- a line that never made it back\n",
+            encoding="utf-8",
+        )
+        assert cmd_store_conflicts(_args(), config) == 0
+        out = capsys.readouterr().out
+        assert "a line that never made it back" in out
+        assert "exist only in conflict copies" in out
+
+    def test_says_safe_to_delete_when_nothing_unique(self, store_config, capsys):
+        config, root = store_config
+        (root / "GLOBAL_MEMORY.sync-conflict-20260715-1-A.md").write_text(
+            "### Project one\n- detail one\n", encoding="utf-8"
+        )
+        cmd_store_conflicts(_args(), config)
+        assert "safe to delete" in capsys.readouterr().out
+
+    def test_reworded_lines_do_not_count_as_lost(self, store_config, capsys):
+        # A fork mostly produces variants of lines the live file still has.
+        # Counting those as losses turns a handful of real ones into hundreds
+        # of false ones, and a report that cries wolf does not get read.
+        config, root = store_config
+        (root / "GLOBAL_MEMORY.md").write_text(
+            "### Project one\n"
+            "- The hot layer limit is 100 lines and 38,000 chars, with 120 lines "
+            "accepted as the working floor because the char ceiling binds first\n",
+            encoding="utf-8",
+        )
+        (root / "GLOBAL_MEMORY.sync-conflict-20260715-1-A.md").write_text(
+            "### Project one\n"
+            "- The hot layer limit is 100 lines and 38,000 chars, with 120 lines "
+            "accepted as the working floor\n",
+            encoding="utf-8",
+        )
+        cmd_store_conflicts(_args(), config)
+        assert "safe to delete" in capsys.readouterr().out
+
+    def test_handles_conflict_with_no_live_counterpart(self, store_config, capsys):
+        config, root = store_config
+        (root / "GONE.sync-conflict-20260715-1-A.md").write_text("- x\n", encoding="utf-8")
+        assert cmd_store_conflicts(_args(), config) == 0
+        assert "no live counterpart" in capsys.readouterr().out
+
+
+@pytest.mark.smoke
+class TestProjectCommand:
+    def test_dry_run_writes_nothing(self, store_config, capsys):
+        config, _ = store_config
+        cmd_project(_args(dry_run=True, force=False), config)
+        assert "DRY RUN" in capsys.readouterr().out
+        assert not (config.projection_root / "CLAUDE_CORE.md").exists()
+
+    def test_writes_core_topics_and_skill(self, store_config):
+        config, _ = store_config
+        assert cmd_project(_args(dry_run=False, force=False), config) == 0
+        assert (config.projection_root / "CLAUDE_CORE.md").exists()
+        assert (config.skill_root / "SKILL.md").exists()
+
+    def test_refuses_over_budget_without_force(self, store_config, capsys):
+        config, _ = store_config
+        config = Config(**{**config.__dict__, "core_max_chars": 10})
+        assert cmd_project(_args(dry_run=False, force=False), config) == 1
+        assert "Refusing to write" in capsys.readouterr().err
+
+    def test_force_writes_over_budget(self, store_config):
+        config, _ = store_config
+        config = Config(**{**config.__dict__, "core_max_chars": 10})
+        assert cmd_project(_args(dry_run=False, force=True), config) == 0
+        assert (config.projection_root / "CLAUDE_CORE.md").exists()
+
+    def test_removes_legacy_synced_copy(self, store_config):
+        # Phase 1 wrote generated output into the synced store; that copy has
+        # wrong paths on every other machine and must not linger.
+        config, root = store_config
+        legacy = root / "core"
+        legacy.mkdir()
+        (legacy / "CLAUDE_CORE.md").write_text("stale", encoding="utf-8")
+        cmd_project(_args(dry_run=False, force=False), config)
+        assert not legacy.exists()

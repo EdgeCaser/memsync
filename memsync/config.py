@@ -198,6 +198,10 @@ class Config:
     skill_name: str = "memsync-memory"
     skill_root: Path | None = None           # None = ~/.claude/skills/<skill_name>
 
+    # [store] — git-backed history (docs/progressive-disclosure-memory-design.md)
+    git_enabled: bool = False                # snapshot every store write as a commit
+    git_autosync: bool = False               # pull before / push after those writes
+
     # [paths]
     sync_root: Path | None = None           # None = use provider auto-detect
     claude_md_target: Path = None           # set in __post_init__
@@ -343,6 +347,8 @@ class Config:
             skill_root=(
                 Path(core["skill_root"]).expanduser() if core.get("skill_root") else None
             ),
+            git_enabled=core.get("git_enabled", False),
+            git_autosync=core.get("git_autosync", False),
             sync_root=Path(sync_root) if sync_root else None,
             claude_md_target=(
                 Path(claude_md_target_str).expanduser() if claude_md_target_str else None
@@ -386,6 +392,8 @@ class Config:
             f"core_max_chars = {self.core_max_chars}",
             f"skill_enabled = {str(self.skill_enabled).lower()}",
             f'skill_name = "{self.skill_name}"',
+            f"git_enabled = {str(self.git_enabled).lower()}",
+            f"git_autosync = {str(self.git_autosync).lower()}",
         ]
         if self.api_key:
             lines.append(f'api_key = "{self.api_key}"')

@@ -1115,6 +1115,191 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+# Commands that write the shared store, and so are worth a commit. `project`
+# is absent on purpose: its output is machine-local and regenerated, so
+# committing it would version a derived artefact.
+_STORE_WRITERS = frozenset({"init", "refresh", "harvest", "dedup", "prune"})
+
+
+def _snapshot_store(config: Config, memory_root: Path, message: str) -> None:
+    """
+    Record a store write in git history, if the store is a repo and git is on.
+
+    Best-effort by design: the memory write has already happened and succeeded,
+    so a bookkeeping failure is reported, not raised.
+    """
+    if not config.git_enabled:
+        return
+    from memsync import store
+
+    if config.git_autosync:
+        try:
+            store.pull(memory_root)
+        except store.StoreError as exc:
+            print(f"  store: pull skipped — {exc}", file=sys.stderr)
+
+    commit = store.snapshot(memory_root, message)
+    if commit:
+        print(f"  store: committed {commit}")
+
+    if config.git_autosync and commit:
+        try:
+            print(f"  store: {store.push(memory_root)}")
+        except store.StoreError as exc:
+            print(f"  store: push failed — {exc}", file=sys.stderr)
+
+
+def cmd_store(args: argparse.Namespace, config: Config) -> int:
+    """Inspect or initialise git-backed history for the memory store."""
+    from memsync import store
+
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+
+    action = getattr(args, "store_command", "status")
+
+    if action == "init":
+        try:
+            steps = store.init_repo(memory_root, allow_syncthing=args.allow_syncthing)
+        except store.StoreError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(f"Store at {memory_root}:")
+        for step in steps:
+            print(f"  {step}")
+        print(
+            "\nNo remote is configured, so history is local only. Add one with:\n"
+            "  git -C <store> remote add origin <url>\n"
+            "Then enable: memsync config set git_enabled true"
+        )
+        return 0
+
+    if action == "sync":
+        if not store.is_repo(memory_root):
+            print("Error: store is not a git repository. Run 'memsync store init'.",
+                  file=sys.stderr)
+            return 1
+        try:
+            print(f"  {store.pull(memory_root)}")
+            commit = store.snapshot(memory_root, "memsync: manual sync")
+            if commit:
+                print(f"  committed {commit}")
+            print(f"  {store.push(memory_root)}")
+        except store.StoreError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    st = store.status(memory_root)
+    print(f"Store:        {memory_root}")
+    print(f"Git:          {'repository' if st.is_repo else 'not a repository'}")
+    if st.is_repo:
+        print(f"Branch:       {st.branch}{' (uncommitted changes)' if st.dirty else ''}")
+        print(f"Remote:       {st.remote or 'none — history is local only'}")
+        if st.remote:
+            print(f"Divergence:   {st.ahead} ahead, {st.behind} behind")
+    print(f"git_enabled:  {str(config.git_enabled).lower()}")
+
+    markers = store.syncthing_markers(memory_root)
+    if markers:
+        print("\n  ! This store is inside a Syncthing folder.")
+        print(f"    {', '.join(markers)}")
+        print("    Git and file-level sync must not both manage this directory:")
+        print("    Syncthing replicating .git/ corrupts the repository.")
+    if st.conflict_files:
+        print(f"\n  ! {st.conflict_files} Syncthing conflict file(s) present.")
+        print("    Run 'memsync store conflicts' to see what they contain.")
+    return 0
+
+
+def cmd_store_conflicts(args: argparse.Namespace, config: Config) -> int:
+    """
+    Report what Syncthing's conflict copies hold that the live files do not.
+
+    The question worth answering before deleting them is not how many there are
+    but whether anything was lost when Syncthing forked the file — a fork is
+    silent, so nobody has checked.
+    """
+    from memsync import store
+    from memsync.sync import _constraint_is_superseded, _normalize_bullet
+
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+
+    conflicts = store.conflict_files(memory_root)
+    if not conflicts:
+        print("No Syncthing conflict files found.")
+        return 0
+
+    # Compare against every live memory file, not just the forked one's
+    # counterpart. Content migrates hot -> cold as a normal part of harvest, so
+    # a line demoted to the archive is still present in the store even though
+    # it has left GLOBAL_MEMORY.md. Checking only the counterpart reports those
+    # demotions as losses.
+    live_corpus: list[str] = []
+    for candidate in sorted(memory_root.glob("*.md")):
+        if ".sync-conflict-" in candidate.name:
+            continue
+        try:
+            live_corpus.append(candidate.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    corpus_norm = [
+        (n, set(n.split()))
+        for n in (
+            _normalize_bullet(ln.strip())
+            for text in live_corpus
+            for ln in text.splitlines()
+            if ln.strip()[:1] in ("-", "*", "+")
+        )
+        if n
+    ]
+
+    print(f"{len(conflicts)} conflict file(s) in {memory_root}\n")
+    total_unique = 0
+    for path in conflicts:
+        # "GLOBAL_MEMORY.sync-conflict-20260715-085323-ZJ5IFMP.md" -> "GLOBAL_MEMORY.md"
+        stem = path.name.split(".sync-conflict-")[0]
+        live = memory_root / f"{stem}{path.suffix}"
+        if not live.exists():
+            print(f"  {path.name}: no live counterpart at {live.name}")
+            continue
+        try:
+            conflict_text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"  {path.name}: unreadable — {exc}")
+            continue
+
+        # Coverage, not exact match. Most of what a fork "loses" is a line the
+        # store also has in reworded or extended form, and counting those as
+        # missing turns a handful of real losses into hundreds of false ones —
+        # worse than not checking, because nobody reads a report that cries wolf.
+        unique = [
+            ln.strip()
+            for ln in conflict_text.splitlines()
+            if ln.strip()[:1] in ("-", "*", "+")
+            and not _constraint_is_superseded(ln.strip(), corpus_norm)
+        ]
+        total_unique += len(unique)
+        print(f"  {path.name}")
+        print(f"    {len(unique)} line(s) not found anywhere in the live store")
+        for line in unique[:5]:
+            print(f"      {line[:130]}")
+        if len(unique) > 5:
+            print(f"      ... and {len(unique) - 5} more")
+
+    if total_unique == 0:
+        print("\nNothing in these files is missing from the live store — safe to delete.")
+    else:
+        print(
+            f"\n{total_unique} line(s) exist only in conflict copies. Review before "
+            "deleting; memsync will not remove them for you."
+        )
+    return 0
+
+
 def cmd_project(args: argparse.Namespace, config: Config) -> int:
     """Generate the always-resident core and on-demand topic files."""
     from memsync.projection import (
@@ -1570,7 +1755,8 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
         "harvest_chunk_tokens_anthropic",
         "chunk_inter_call_sleep",
         "max_hot_lines", "archive_in_harvest", "archive_max_lines_in_prompt",
-        "projection_enabled", "core_max_chars",
+        "projection_enabled", "core_max_chars", "skill_enabled",
+        "git_enabled", "git_autosync",
     }
     if key not in valid_keys:
         print(
@@ -1754,14 +1940,11 @@ def cmd_config_set(args: argparse.Namespace, config: Config) -> int:
             return 1
         config = dataclasses.replace(config, max_hot_lines=ivalue)
 
-    elif key == "projection_enabled":
+    elif key in ("projection_enabled", "skill_enabled", "git_enabled", "git_autosync"):
         if value.lower() not in ("true", "false"):
-            print(
-                f"Error: projection_enabled must be true or false, got {value!r}.",
-                file=sys.stderr,
-            )
+            print(f"Error: {key} must be true or false, got {value!r}.", file=sys.stderr)
             return 1
-        config = dataclasses.replace(config, projection_enabled=value.lower() == "true")
+        config = dataclasses.replace(config, **{key: value.lower() == "true"})
 
     elif key == "core_max_chars":
         try:
@@ -2194,6 +2377,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_dedup.set_defaults(func=cmd_dedup)
 
+    # store
+    p_store = subparsers.add_parser(
+        "store", help="Git-backed history for the shared memory store"
+    )
+    store_sub = p_store.add_subparsers(dest="store_command", required=True)
+
+    p_store_status = store_sub.add_parser("status", help="Show store and git state")
+    p_store_status.set_defaults(func=cmd_store)
+
+    p_store_init = store_sub.add_parser("init", help="Make the store a git repository")
+    p_store_init.add_argument(
+        "--allow-syncthing",
+        action="store_true",
+        help="Proceed even though Syncthing markers are present (see the docs first)",
+    )
+    p_store_init.set_defaults(func=cmd_store)
+
+    p_store_sync = store_sub.add_parser("sync", help="Pull, commit, push")
+    p_store_sync.set_defaults(func=cmd_store)
+
+    p_store_conflicts = store_sub.add_parser(
+        "conflicts", help="Report what Syncthing conflict copies hold that the live files do not"
+    )
+    p_store_conflicts.set_defaults(func=cmd_store_conflicts)
+
     # project
     p_project = subparsers.add_parser(
         "project",
@@ -2287,7 +2495,19 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     config = Config.load()
-    sys.exit(args.func(args, config))
+    code = args.func(args, config)
+
+    # Snapshot after the command rather than at each write site: the store is
+    # written from several paths inside refresh, harvest and dedup, and hooking
+    # the dispatcher covers all of them — including ones added later — without
+    # scattering bookkeeping through the write logic. Only on success, and only
+    # for commands that touch the store.
+    if code == 0 and config.git_enabled and getattr(args, "command", None) in _STORE_WRITERS:
+        memory_root, _ = _require_memory_root(config)
+        if memory_root is not None:
+            _snapshot_store(config, memory_root, f"memsync: {args.command}")
+
+    sys.exit(code)
 
 
 if __name__ == "__main__":

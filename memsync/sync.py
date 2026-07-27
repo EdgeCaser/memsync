@@ -1029,10 +1029,17 @@ def _constraint_is_superseded(old_line: str, new_normalized: list[tuple[str, set
     if not tokens:
         return False
     for cand_norm, cand_tokens in new_normalized:
-        if len(cand_norm) >= len(norm) and len(tokens & cand_tokens) / len(tokens) >= 0.90:
+        overlap = len(tokens & cand_tokens) / len(tokens)
+        if len(cand_norm) >= len(norm) and overlap >= 0.90:
             return True
+        # Gate the expensive comparison on cheap set overlap. SequenceMatcher is
+        # quadratic in the strings, and this runs against every candidate: on a
+        # 125-bullet constraints section that is irrelevant, but against a
+        # 1,500-line archive it is minutes. Two bullets sharing under 60% of
+        # their words cannot reach a 0.85 ratio, so skipping them costs nothing.
         if (
             len(norm) >= _REWORD_MIN_CHARS
+            and overlap >= 0.60
             and difflib.SequenceMatcher(None, norm, cand_norm).ratio() >= 0.85
         ):
             return True
