@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import platform
@@ -710,7 +711,9 @@ class TestBatchedHarvest:
     def test_extracts_each_session_merges_once(self):
         from memsync.sync import harvest_sessions_batched
 
-        config = Config()
+        # Pacing is exercised in test_paces_between_sessions; disable it
+        # here so this test is not dominated by real sleeps.
+        config = dataclasses.replace(Config(), chunk_inter_call_sleep=0)
         sessions = [("s1", "transcript one"), ("s2", "transcript two")]
 
         def fake_extract(transcript, cfg):
@@ -766,7 +769,9 @@ class TestBatchedHarvest:
     def test_failed_extraction_not_marked_harvested(self):
         from memsync.sync import harvest_sessions_batched
 
-        config = Config()
+        # Pacing is exercised in test_paces_between_sessions; disable it
+        # here so this test is not dominated by real sleeps.
+        config = dataclasses.replace(Config(), chunk_inter_call_sleep=0)
         sessions = [("good", "t1"), ("bad", "t2")]
 
         def fake_extract(transcript, cfg):
@@ -801,3 +806,115 @@ class TestBatchedHarvest:
 
         assert "good" in result["harvested_ids"]
         assert "bad" not in result["harvested_ids"]  # failed extraction retries next run
+        # A silent retry is how two nights of dead harvests went unnoticed, so
+        # the reason has to travel back to the caller, not just the log.
+        assert [sid for sid, _ in result["failed_ids"]] == ["bad"]
+        assert "backend down" in result["failed_ids"][0][1]
+
+    def _ok_extract(self, transcript, cfg):
+        return {
+            "candidates": "- a fact",
+            "truncated": False,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "backend": "x",
+            "chunks_processed": 1,
+        }
+
+    def _ok_merge(self, candidates, memory, cfg, cold):
+        return {
+            "updated_content": memory,
+            "updated_cold": cold,
+            "changed": True,
+            "changed_hot": True,
+            "changed_cold": False,
+            "truncated": False,
+            "malformed": False,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "backend": "x",
+        }
+
+    def test_on_session_observes_every_outcome(self):
+        from memsync.sync import harvest_sessions_batched
+
+        # Pacing is exercised in test_paces_between_sessions; disable it
+        # here so this test is not dominated by real sleeps.
+        config = dataclasses.replace(Config(), chunk_inter_call_sleep=0)
+        sessions = [("ok", "t1"), ("bad", "t2"), ("blank", "   ")]
+
+        def fake_extract(transcript, cfg):
+            if transcript == "t2":
+                raise RuntimeError("nope")
+            return self._ok_extract(transcript, cfg)
+
+        seen: list[tuple[str, str]] = []
+        with patch("memsync.sync.extract_candidates_from_chunk", side_effect=fake_extract):
+            with patch("memsync.sync.merge_candidates_into_memory", side_effect=self._ok_merge):
+                harvest_sessions_batched(
+                    sessions, "# Mem\n", config, "",
+                    on_session=lambda sid, ext, ms, status: seen.append((sid, status)),
+                )
+
+        assert seen == [("ok", "extracted"), ("bad", "failed"), ("blank", "empty")]
+
+    def test_deferred_sessions_are_observed(self):
+        # The caller has to be able to say "these were not attempted", otherwise
+        # a truncated run looks identical to a complete one.
+        from memsync.sync import harvest_sessions_batched
+
+        config = Config()
+        seen: list[tuple[str, str]] = []
+        with patch("memsync.sync.merge_candidates_into_memory"):
+            harvest_sessions_batched(
+                [("s1", "t1"), ("s2", "t2")], "# Mem\n", config, "", deadline=-1.0,
+                on_session=lambda sid, ext, ms, status: seen.append((sid, status)),
+            )
+
+        assert seen == [("s1", "deferred"), ("s2", "deferred")]
+
+    def test_paces_between_sessions(self):
+        # Batching removed the per-session call boundary that used to space
+        # these out; extraction is now the only thing looping over backends.
+        from memsync.sync import harvest_sessions_batched
+
+        config = dataclasses.replace(Config(), chunk_inter_call_sleep=7)
+        sleeps: list[float] = []
+        with patch("memsync.sync.extract_candidates_from_chunk", side_effect=self._ok_extract):
+            with patch("memsync.sync.merge_candidates_into_memory", side_effect=self._ok_merge):
+                with patch("time.sleep", side_effect=sleeps.append):
+                    harvest_sessions_batched(
+                        [("s1", "t1"), ("s2", "t2"), ("s3", "t3")], "# Mem\n", config, "",
+                    )
+
+        assert sleeps == [7, 7]  # between sessions, not before the first
+
+    def test_empty_sessions_do_not_trigger_pacing(self):
+        from memsync.sync import harvest_sessions_batched
+
+        config = dataclasses.replace(Config(), chunk_inter_call_sleep=7)
+        sleeps: list[float] = []
+        with patch("memsync.sync.extract_candidates_from_chunk", side_effect=self._ok_extract):
+            with patch("memsync.sync.merge_candidates_into_memory", side_effect=self._ok_merge):
+                with patch("time.sleep", side_effect=sleeps.append):
+                    harvest_sessions_batched(
+                        [("blank", "  "), ("s1", "t1")], "# Mem\n", config, "",
+                    )
+
+        assert sleeps == []  # an empty transcript issues no call to pace against
+
+    def test_a_raising_observer_does_not_take_down_the_harvest(self):
+        from memsync.sync import harvest_sessions_batched
+
+        config = Config()
+
+        def boom(*a, **kw):
+            raise RuntimeError("observer exploded")
+
+        with patch("memsync.sync.extract_candidates_from_chunk", side_effect=self._ok_extract):
+            with patch("memsync.sync.merge_candidates_into_memory", side_effect=self._ok_merge):
+                result = harvest_sessions_batched(
+                    [("s1", "t1")], "# Mem\n", config, "", on_session=boom,
+                )
+
+        assert result["harvested_ids"] == ["s1"]

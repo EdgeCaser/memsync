@@ -35,6 +35,7 @@ from memsync.llm import LLMError
 from memsync.providers import all_providers, auto_detect, get_provider
 from memsync.sync import (
     harvest_memory_content,
+    harvest_sessions_batched,
     load_or_init_archive,
     load_or_init_memory,
     log_session_notes,
@@ -651,83 +652,133 @@ def _harvest_all_locked(
     errors = 0
     updated_count = 0
     error_sessions: list[tuple[str, str]] = []
-    _first_call = True
 
+    # Read transcripts up front — local file reads, cheap relative to any LLM call.
+    sessions: list[tuple[str, str]] = []
+    message_counts: dict[str, int] = {}
     for session_path in new_sessions:
-        if args.auto:
-            max_runtime = config.daemon.harvest_max_runtime_seconds
-            elapsed = time.monotonic() - started_at
-            if max_runtime > 0 and elapsed >= max_runtime:
-                break
-
         transcript, msg_count = read_session_transcript(session_path)
+        message_counts[session_path.stem] = msg_count
+        sessions.append((session_path.stem, transcript))
 
-        if not transcript.strip():
-            harvested[session_path.stem] = msg_count  # empty transcripts won't improve on retry
-            continue
+    # Batched harvest: extract from every session, then merge ONCE.
+    #
+    # This used to merge per session, and the merge regenerates the entire hot
+    # layer regardless of what the session contained — so a 48-char transcript
+    # cost the same ~167s as a 9,665-char one, and 25 sessions could not fit in
+    # the 30-minute budget. Measured on the Pi 2026-07-28: extract 3.6s median,
+    # merge 102-146s, the merge being 97% of a single-chunk session.
+    #
+    # The trade is that memory is no longer rebuilt between sessions within a
+    # run, so later sessions in a batch cannot see facts extracted from earlier
+    # ones. Candidates are merged together in one pass instead, which is where
+    # cross-session duplicates get reconciled anyway.
+    max_runtime = config.daemon.harvest_max_runtime_seconds if args.auto else 0
+    deadline = (
+        started_at + max_runtime - config.claude_code_timeout if max_runtime > 0 else None
+    )
 
-        if not args.auto:
-            print(f"  Harvesting {session_path.stem}...", end=" ", flush=True)
-
-        if not _first_call:
-            time.sleep(config.chunk_inter_call_sleep)
-        _first_call = False
-
-        call_started = time.monotonic()
-        try:
-            result = harvest_memory_content(transcript, current_memory, config, current_cold)
-        except LLMError as e:
-            print(f"\nError processing {session_path.stem}: {e}", file=sys.stderr)
+    def _on_session(sid: str, ext: dict | None, ms: int, status: str) -> None:
+        nonlocal errors
+        if status == "empty":
+            return
+        if status == "deferred":
+            if not args.auto:
+                print(f"  {sid}: deferred to next run (runtime budget).")
+            return
+        if status == "failed":
             errors += 1
-            error_sessions.append((session_path.stem, f"all backends failed: {str(e)[:120]}"))
-            continue  # not marked — will retry on next run
-        call_ms = int((time.monotonic() - call_started) * 1000)
-
+            error_sessions.append((sid, "extract failed — will retry next run"))
+            if not args.auto:
+                print(f"  {sid}: extract failed — will retry next run.")
+            return
+        # status == "extracted"
+        if not args.auto:
+            found = len((ext or {}).get("candidates", "").strip())
+            backend = (ext or {}).get("backend", "unknown")
+            print(f"  {sid}: extracted {found} chars [{backend}, {ms / 1000:.1f}s]")
         try:
             append_usage(
                 memory_root,
                 command="harvest",
                 model=config.model,
-                input_tokens=result.get("input_tokens", 0),
-                output_tokens=result.get("output_tokens", 0),
-                session_id=session_path.stem,
-                changed=result.get("changed", False),
-                backend=result.get("backend", ""),
-                duration_ms=call_ms,
+                input_tokens=(ext or {}).get("input_tokens", 0),
+                output_tokens=(ext or {}).get("output_tokens", 0),
+                session_id=sid,
+                changed=False,  # the batch merge decides this; recorded on the run
+                backend=(ext or {}).get("backend", ""),
+                duration_ms=ms,
             )
         except OSError as e:
             logger.warning("Failed to write usage log: %s", e)
 
-        if result.get("malformed"):
-            if not args.auto:
-                print("malformed response — skipped.")
+    if not args.auto:
+        print(f"Extracting from {len(sessions)} session(s), then merging once...")
+
+    merge_started = time.monotonic()
+    try:
+        result = harvest_sessions_batched(
+            sessions,
+            current_memory,
+            config,
+            current_cold,
+            deadline=deadline,
+            on_session=_on_session,
+        )
+    except LLMError as e:
+        print(f"\nError: batched merge failed: {e}", file=sys.stderr)
+        errors += 1
+        error_sessions.append(("(merge)", f"all backends failed: {str(e)[:120]}"))
+        result = None
+
+    if result is not None:
+        for sid, reason in result.get("failed_ids", []):
+            if not any(existing == sid for existing, _ in error_sessions):
+                error_sessions.append((sid, reason))
+
+        if result.get("malformed") or result.get("truncated"):
+            # Nothing is marked harvested — the write is skipped, so every
+            # session in the batch retries next run rather than being silently
+            # dropped after a response that could not be used.
+            reason = "malformed" if result.get("malformed") else "truncated"
             errors += 1
-            error_sessions.append((session_path.stem, "malformed response"))
-            continue  # not marked — will retry on next run
-
-        harvested[session_path.stem] = msg_count
-        save_harvested_index(memory_root, harvested)
-
-        if result["truncated"]:
+            error_sessions.append(("(merge)", f"{reason} response — batch not written"))
             if not args.auto:
-                print("truncated — skipped.")
-            continue
-
-        if result["changed"]:
-            current_memory = result["updated_content"]
-            changed_any = True
-            updated_count += 1
-            if result.get("changed_cold") and result.get("updated_cold"):
-                current_cold = result["updated_cold"]
-                changed_cold_any = True
-            if not args.auto:
-                backend = result.get("backend", "unknown")
-                chunks = result.get("chunks_processed", 1)
-                tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
-                print(f"updated. [{backend}, {chunks} chunk(s), {tokens} tokens]")
+                print(f"\nMerge response {reason} — nothing written; batch will retry.")
         else:
-            if not args.auto:
-                print("no changes.")
+            for sid in result.get("harvested_ids", []):
+                harvested[sid] = message_counts.get(sid, 0)
+            save_harvested_index(memory_root, harvested)
+            updated_count = len(result.get("harvested_ids", []))
+
+            try:
+                append_usage(
+                    memory_root,
+                    command="harvest",
+                    model=config.model,
+                    input_tokens=result.get("input_tokens", 0),
+                    output_tokens=result.get("output_tokens", 0),
+                    session_id="(merge)",
+                    changed=result.get("changed", False),
+                    backend=result.get("backend", ""),
+                    duration_ms=int((time.monotonic() - merge_started) * 1000),
+                )
+            except OSError as e:
+                logger.warning("Failed to write usage log: %s", e)
+
+            if result["changed"]:
+                current_memory = result["updated_content"]
+                changed_any = True
+                if result.get("changed_cold") and result.get("updated_cold"):
+                    current_cold = result["updated_cold"]
+                    changed_cold_any = True
+                if not args.auto:
+                    backend = result.get("backend", "unknown")
+                    tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
+                    print(
+                        f"\nMerged {updated_count} session(s) "
+                        f"[{backend}, {tokens} tokens]"
+                    )
 
     if changed_any:
         backup_path = backup(global_memory, memory_root / "backups")

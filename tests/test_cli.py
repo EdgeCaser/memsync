@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import dataclasses
+import json
 import platform
 import sys
 from pathlib import Path
@@ -1049,6 +1050,30 @@ def _redirect_projects_dir(monkeypatch, target_dir):
     monkeypatch.setattr(Path, "expanduser", _expanduser)
 
 
+def _mock_batched_result(changed=True, truncated=False, malformed=False,
+                         content=SAMPLE_MEMORY, harvested_ids=None, failed_ids=None):
+    """Return shape of sync.harvest_sessions_batched, which the --all path uses.
+
+    The --all sweep extracts per session then merges once, so what it gets back
+    is a single merge result carrying the ids folded into it — not one result
+    per session.
+    """
+    return {
+        "updated_content": content,
+        "updated_cold": "",
+        "changed": changed,
+        "changed_hot": changed,
+        "changed_cold": False,
+        "truncated": truncated,
+        "malformed": malformed,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "backend": "claude_code",
+        "harvested_ids": ["session-001"] if harvested_ids is None else harvested_ids,
+        "failed_ids": failed_ids or [],
+    }
+
+
 class TestHarvestAll:
     def _mock_harvest_result(self, changed=True, truncated=False, malformed=False,
                              content=SAMPLE_MEMORY):
@@ -1097,7 +1122,7 @@ class TestHarvestAll:
         updated = SAMPLE_MEMORY + "\n- harvested from all"
         mock_result = self._mock_harvest_result(changed=True, content=updated)
 
-        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+        with patch("memsync.cli.harvest_sessions_batched", return_value=mock_result):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     result = _harvest_all(
@@ -1119,7 +1144,7 @@ class TestHarvestAll:
         s1.write_text('{"type":"user"}', encoding="utf-8")
         _redirect_projects_dir(monkeypatch, projects_dir)
 
-        with patch("memsync.cli.harvest_memory_content", side_effect=LLMError("all backends failed")):
+        with patch("memsync.cli.harvest_sessions_batched", side_effect=LLMError("all backends failed")):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     result = _harvest_all(
@@ -1140,7 +1165,7 @@ class TestHarvestAll:
         _redirect_projects_dir(monkeypatch, projects_dir)
 
         mock_result = self._mock_harvest_result(changed=True, truncated=True)
-        with patch("memsync.cli.harvest_memory_content", return_value=mock_result):
+        with patch("memsync.cli.harvest_sessions_batched", return_value=mock_result):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     _harvest_all(
@@ -1174,11 +1199,11 @@ class TestHarvestAll:
 
         captured = []
 
-        def mock_harvest(transcript, memory, cfg, cold=""):
+        def mock_harvest(sessions, memory, cfg, cold="", **kw):
             captured.append(cfg)
-            return self._mock_harvest_result(changed=False)
+            return _mock_batched_result(changed=False)
 
-        with patch("memsync.cli.harvest_memory_content", side_effect=mock_harvest):
+        with patch("memsync.cli.harvest_sessions_batched", side_effect=mock_harvest):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 _harvest_all(_harvest_args(auto=True), config, memory_root, global_memory)
 
@@ -1202,11 +1227,15 @@ class TestHarvestAll:
             daemon=dataclasses.replace(config.daemon, harvest_max_sessions_per_run=2),
         )
 
-        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_harvest_result(changed=False)) as mock_harvest:
+        with patch("memsync.cli.harvest_sessions_batched",
+                   return_value=_mock_batched_result(changed=False)) as mock_harvest:
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 _harvest_all(_harvest_args(auto=True), config, memory_root, global_memory)
 
-        assert mock_harvest.call_count == 2
+        # One batched call now, but the per-run cap still has to bite: 3 sessions
+        # exist and the cap is 2, so the batch must contain exactly 2.
+        assert mock_harvest.call_count == 1
+        assert len(mock_harvest.call_args[0][0]) == 2
 
 
 class TestHarvestAcrossMultipleRoots:
@@ -1234,18 +1263,15 @@ class TestHarvestAcrossMultipleRoots:
         )
 
     def _run(self, config, memory_root, global_memory, seen):
-        def _record(transcript, *a, **kw):  # noqa: ARG001
-            seen.append(transcript)
-            return {
-                "updated_content": SAMPLE_MEMORY,
-                "changed": False,
-                "truncated": False,
-                "malformed": False,
-                "input_tokens": 1,
-                "output_tokens": 1,
-            }
+        # The sweep now hands every session to one batched call, so what these
+        # tests count is the ids in that batch rather than one call per session.
+        def _record(sessions, *a, **kw):  # noqa: ARG001
+            seen.extend(sid for sid, _ in sessions)
+            return _mock_batched_result(
+                changed=False, harvested_ids=[sid for sid, _ in sessions]
+            )
 
-        with patch("memsync.cli.harvest_memory_content", side_effect=_record):
+        with patch("memsync.cli.harvest_sessions_batched", side_effect=_record):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     return _harvest_all(
@@ -1670,15 +1696,13 @@ class TestCmdPruneExtras:
 # ---------------------------------------------------------------------------
 
 class TestHarvestAllNonAuto:
-    def _mock_result(self, changed=True, truncated=False, malformed=False, content=SAMPLE_MEMORY):
-        return {
-            "updated_content": content,
-            "changed": changed,
-            "truncated": truncated,
-            "malformed": malformed,
-            "input_tokens": 100,
-            "output_tokens": 50,
-        }
+    def _mock_result(self, changed=True, truncated=False, malformed=False,
+                     content=SAMPLE_MEMORY, harvested_ids=None):
+        return _mock_batched_result(
+            changed=changed, truncated=truncated, malformed=malformed,
+            content=content,
+            harvested_ids=["session-000"] if harvested_ids is None else harvested_ids,
+        )
 
     def _setup_project(self, tmp_path, n_sessions=1):
         projects_dir = tmp_path / "claude-projects"
@@ -1709,7 +1733,7 @@ class TestHarvestAllNonAuto:
         projects_dir, _ = self._setup_project(tmp_path)
         _redirect_projects_dir(monkeypatch, projects_dir)
 
-        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=False)):
+        with patch("memsync.cli.harvest_sessions_batched", return_value=self._mock_result(changed=False)):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     result = _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
@@ -1717,7 +1741,7 @@ class TestHarvestAllNonAuto:
         out = capsys.readouterr().out
         assert result == 0
         assert "unprocessed session" in out
-        assert "no changes" in out
+        assert "No memory changes" in out
 
     def test_model_override_applies(self, memory_file, monkeypatch, capsys):
         config, tmp_path, global_memory = memory_file
@@ -1727,11 +1751,11 @@ class TestHarvestAllNonAuto:
 
         captured = []
 
-        def mock_harvest(transcript, memory, cfg, cold=""):
+        def mock_harvest(sessions, memory, cfg, cold="", **kw):
             captured.append(cfg)
             return self._mock_result(changed=False)
 
-        with patch("memsync.cli.harvest_memory_content", side_effect=mock_harvest):
+        with patch("memsync.cli.harvest_sessions_batched", side_effect=mock_harvest):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     _harvest_all(
@@ -1748,7 +1772,7 @@ class TestHarvestAllNonAuto:
         _redirect_projects_dir(monkeypatch, projects_dir)
 
         updated = SAMPLE_MEMORY + "\n- new item"
-        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=True, content=updated)):
+        with patch("memsync.cli.harvest_sessions_batched", return_value=self._mock_result(changed=True, content=updated)):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     with patch("memsync.cli._sync_instruction_targets"):
@@ -1756,7 +1780,7 @@ class TestHarvestAllNonAuto:
 
         out = capsys.readouterr().out
         assert result == 0
-        assert "updated" in out
+        assert "Merged" in out
         assert "done" in out
 
     def test_no_changes_non_auto_prints_message(self, memory_file, monkeypatch, capsys):
@@ -1765,7 +1789,7 @@ class TestHarvestAllNonAuto:
         projects_dir, _ = self._setup_project(tmp_path)
         _redirect_projects_dir(monkeypatch, projects_dir)
 
-        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=False)):
+        with patch("memsync.cli.harvest_sessions_batched", return_value=self._mock_result(changed=False)):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     result = _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
@@ -1780,7 +1804,7 @@ class TestHarvestAllNonAuto:
         projects_dir, _ = self._setup_project(tmp_path)
         _redirect_projects_dir(monkeypatch, projects_dir)
 
-        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(truncated=True)):
+        with patch("memsync.cli.harvest_sessions_batched", return_value=self._mock_result(truncated=True)):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
@@ -1794,7 +1818,7 @@ class TestHarvestAllNonAuto:
         projects_dir, _ = self._setup_project(tmp_path)
         _redirect_projects_dir(monkeypatch, projects_dir)
 
-        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(malformed=True)):
+        with patch("memsync.cli.harvest_sessions_batched", return_value=self._mock_result(malformed=True)):
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
                 with patch("time.sleep"):
                     _harvest_all(_harvest_args(auto=False), config, memory_root, global_memory)
@@ -1802,19 +1826,65 @@ class TestHarvestAllNonAuto:
         out = capsys.readouterr().out
         assert "malformed" in out
 
-    def test_multiple_sessions_triggers_sleep(self, memory_file, monkeypatch, capsys):
+    def test_all_sessions_go_to_one_batched_call(self, memory_file, monkeypatch, capsys):
+        # Replaces test_multiple_sessions_triggers_sleep. The sweep no longer
+        # paces itself between sessions, because it no longer makes a call per
+        # session — it makes one batched call. Backend pacing moved down into
+        # extract_candidates_from_chunk's inter-chunk sleep, covered in
+        # tests/test_harvest.py. What matters here is that every session lands
+        # in a single call rather than one merge each, since the per-session
+        # merge is what could not fit inside the runtime budget.
         config, tmp_path, global_memory = memory_file
         memory_root = config.sync_root / ".claude-memory"
         projects_dir, _ = self._setup_project(tmp_path, n_sessions=2)
         _redirect_projects_dir(monkeypatch, projects_dir)
 
-        sleep_calls = []
-        with patch("memsync.cli.harvest_memory_content", return_value=self._mock_result(changed=False)):
+        with patch("memsync.cli.harvest_sessions_batched",
+                   return_value=self._mock_result(changed=False)) as batched:
             with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
-                with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
-                    _harvest_all(_harvest_args(auto=True), config, memory_root, global_memory)
+                _harvest_all(_harvest_args(auto=True), config, memory_root, global_memory)
 
-        assert len(sleep_calls) == 1  # sleep only between 2nd+ sessions
+        assert batched.call_count == 1
+        assert len(batched.call_args[0][0]) == 2
+
+    def test_malformed_merge_marks_nothing_harvested(self, memory_file, monkeypatch, capsys):
+        # Batching raises the stakes on this: one unusable merge response covers
+        # the whole run, so marking the batch done would lose every session in
+        # it silently rather than retrying them.
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path, n_sessions=2)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        with patch("memsync.cli.harvest_sessions_batched",
+                   return_value=self._mock_result(
+                       changed=True, malformed=True,
+                       harvested_ids=["session-000", "session-001"])):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                result = _harvest_all(
+                    _harvest_args(auto=True), config, memory_root, global_memory,
+                )
+
+        index = json.loads((memory_root / "harvested.json").read_text(encoding="utf-8")) \
+            if (memory_root / "harvested.json").exists() else {}
+        assert index == {}, "a malformed merge must not mark its batch harvested"
+        assert result == 1
+
+    def test_batch_merge_failure_is_reported_not_swallowed(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path, n_sessions=1)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        with patch("memsync.cli.harvest_sessions_batched",
+                   side_effect=LLMError("all backends failed")):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                result = _harvest_all(
+                    _harvest_args(auto=True), config, memory_root, global_memory,
+                )
+
+        assert result == 1
+        assert "all backends failed" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

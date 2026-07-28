@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from memsync.config import Config, harvest_chunk_tokens_for_backend
@@ -568,47 +569,89 @@ def harvest_sessions_batched(
     config: Config,
     current_cold: str = "",
     deadline: float | None = None,
+    on_session: Callable[[str, dict | None, int, str], None] | None = None,
 ) -> dict:
     """
     Batched harvest: extract candidate facts from every session, then merge ALL
     of them into memory in a single pass.
 
-    The merge regenerates the full hot layer, which is the slow step (~minutes),
-    so doing it once per run instead of once per session is what keeps the run
-    inside its runtime budget. Extraction is many small, fast calls.
+    The merge regenerates the full hot layer, which is the slow step, so doing
+    it once per run instead of once per session is what keeps the run inside its
+    runtime budget. Extraction is many small, fast calls. Measured on the Pi
+    2026-07-28, interleaved A/B over 5 pairs on identical inputs: extract median
+    3.6s (55 chars out) against merge median 102.2s (34,168 chars out), the
+    merge being 97% of a single-chunk session. Duration tracks output size at
+    roughly 260-330 chars/sec, and the merge re-emits the whole hot layer
+    whatever the session contained — which is why a 48-char transcript cost the
+    same 167s as a 9,665-char one under the per-session path.
 
     sessions: list of (session_id, transcript) tuples.
     deadline: optional time.monotonic() value; stop extracting once reached and
       merge what was collected so far (the rest retry next run). Reserve enough
       headroom before the deadline for one merge — the caller does this.
+    on_session: optional observer called once per session as
+      (session_id, extract_result_or_None, duration_ms, status) where status is
+      "extracted", "empty", "failed" or "deferred". Exists so a caller can keep
+      per-session telemetry and progress output without reimplementing the loop;
+      it must not raise.
+
     Returns the usual merge result dict plus "harvested_ids" — the session ids
-    whose candidates were successfully extracted and folded into the merge.
-    A session that fails extraction is left out (not in harvested_ids) so it
-    retries next run. If the final merge raises, the caller marks nothing.
+    whose candidates were successfully extracted and folded into the merge — and
+    "failed_ids", a list of (session_id, reason) for sessions left out. A
+    session that fails extraction is left out of harvested_ids so it retries
+    next run. If the final merge raises, the caller marks nothing.
     """
     import time
 
     all_candidates: list[str] = []
     harvested_ids: list[str] = []
+    failed_ids: list[tuple[str, str]] = []
     extract_input = 0
     extract_output = 0
+    extracted_any = False  # gates inter-session pacing; empties must not count
 
-    for session_id, transcript in sessions:
+    def _notify(sid: str, ext: dict | None, ms: int, status: str) -> None:
+        if on_session is None:
+            return
+        try:
+            on_session(sid, ext, ms, status)
+        except Exception:  # noqa: BLE001
+            # Observation must never take down the work it is observing.
+            logger.warning("batched harvest: on_session observer failed for %s", sid)
+
+    for index, (session_id, transcript) in enumerate(sessions):
         if deadline is not None and time.monotonic() >= deadline:
+            deferred = sessions[index:]
             logger.warning(
                 "batched harvest: extraction budget reached; merging %d collected session(s), "
                 "%d deferred to next run",
-                len(harvested_ids), len(sessions) - len(harvested_ids),
+                len(harvested_ids), len(deferred),
             )
+            for pending_id, _ in deferred:
+                _notify(pending_id, None, 0, "deferred")
             break
         if not transcript.strip():
             harvested_ids.append(session_id)  # empty transcript — nothing to extract, won't improve
+            _notify(session_id, None, 0, "empty")
             continue
+        # Pace between sessions as well as between chunks within one. The
+        # per-session path used to space its calls out here; batching removed
+        # that boundary, and extraction is now the only thing issuing calls in a
+        # tight loop, so without this a 25-session run fires them back to back
+        # into the RPM limit chunk_inter_call_sleep exists to stay under.
+        if extracted_any and config.chunk_inter_call_sleep > 0:
+            time.sleep(config.chunk_inter_call_sleep)
+        started = time.monotonic()
         try:
             ext = extract_candidates_from_chunk(transcript, config)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             logger.warning("batched harvest: extract failed for %s — will retry next run", session_id)
+            failed_ids.append((session_id, f"extract failed: {str(e)[:120]}"))
+            _notify(session_id, None, int((time.monotonic() - started) * 1000), "failed")
+            extracted_any = True  # a failed attempt still consumed rate budget
             continue  # not marked harvested
+        _notify(session_id, ext, int((time.monotonic() - started) * 1000), "extracted")
+        extracted_any = True
         extract_input += ext["input_tokens"]
         extract_output += ext["output_tokens"]
         if ext["candidates"].strip():
@@ -630,12 +673,14 @@ def harvest_sessions_batched(
             "backend": "none",
             "chunks_processed": 0,
             "harvested_ids": harvested_ids,
+            "failed_ids": failed_ids,
         }
 
     result = merge_candidates_into_memory(combined, current_memory, config, current_cold)
     result["input_tokens"] = result.get("input_tokens", 0) + extract_input
     result["output_tokens"] = result.get("output_tokens", 0) + extract_output
     result["harvested_ids"] = harvested_ids
+    result["failed_ids"] = failed_ids
     return result
 
 
