@@ -164,6 +164,28 @@ def no_window_kwargs() -> dict:
     return {}
 
 
+def _stderr_excerpt(text: str, limit: int = 600) -> str:
+    """
+    Bound a failing CLI's stderr before it goes into an exception message.
+
+    These messages are aggregated across every backend and reported once per
+    session, so an unbounded one multiplies. On the night all four backends were
+    down, codex alone emitted ~6,000 identical token-refresh lines and the
+    harvest's failure report reached 444 KB — past Slack's 40,000-char ceiling,
+    so the alert announcing the failure could not be sent. The alert failed
+    precisely because the failure was large.
+
+    Head and tail are both kept: the first lines say what was attempted, and the
+    last usually carries the actionable error.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    omitted = len(text) - (half * 2)
+    return f"{text[:half]}\n… [{omitted:,} chars omitted] …\n{text[-half:]}"
+
+
 def _call_gemini(system: str, user: str, prefill: str, config: Config) -> dict:
     """
     Call the Gemini API using the native generateContent endpoint.
@@ -264,7 +286,7 @@ def _call_gemini_cli(system: str, user: str, prefill: str, config: Config) -> di
                 "daily token quota likely exhausted; will retry next run"
             )
         raise RuntimeError(
-            f"gemini CLI failed (exit {result.returncode}): {stderr_text}"
+            f"gemini CLI failed (exit {result.returncode}): {_stderr_excerpt(stderr_text)}"
         )
 
     return {
@@ -592,7 +614,9 @@ def _call_claude_code(system: str, user: str, prefill: str, config: Config) -> d
 
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"claude CLI failed (exit {result.returncode}): {stderr}")
+        raise RuntimeError(
+            f"claude CLI failed (exit {result.returncode}): {_stderr_excerpt(stderr)}"
+        )
 
     return {
         "text": result.stdout.decode("utf-8", errors="replace").strip(),
@@ -652,7 +676,9 @@ def _call_codex(system: str, user: str, prefill: str, config: Config) -> dict:  
 
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"codex CLI failed (exit {result.returncode}): {stderr}")
+        raise RuntimeError(
+            f"codex CLI failed (exit {result.returncode}): {_stderr_excerpt(stderr)}"
+        )
 
     return {
         "text": result.stdout.decode("utf-8", errors="replace").strip(),

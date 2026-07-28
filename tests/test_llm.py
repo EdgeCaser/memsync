@@ -60,6 +60,33 @@ class TestClaudeCodeBackend:
         assert "--mcp-config" not in cmd
 
 
+class TestStderrExcerpt:
+    """
+    A failing CLI's stderr goes into the exception message, which is aggregated
+    across backends and printed once per session. Unbounded, that turned one
+    bad night into a 444 KB report — 6,000 lines of the same codex token error —
+    which then exceeded Slack's 40,000-char limit, so the alert about the
+    failure could not be delivered. The alert failed because the failure was big.
+    """
+
+    def test_short_stderr_is_untouched(self):
+        from memsync.llm import _stderr_excerpt
+        assert _stderr_excerpt("token expired") == "token expired"
+
+    def test_long_stderr_is_bounded(self):
+        from memsync.llm import _stderr_excerpt
+        out = _stderr_excerpt("x" * 50_000)
+        assert len(out) < 1_000
+
+    def test_keeps_the_tail_where_the_real_error_usually_is(self):
+        from memsync.llm import _stderr_excerpt
+        noisy = "warning: retrying\n" * 4_000 + "ERROR: could not refresh token"
+        out = _stderr_excerpt(noisy)
+        assert "ERROR: could not refresh token" in out
+        assert "warning: retrying" in out
+        assert "omitted" in out
+
+
 class TestCodexBackend:
     def test_codex_exec_reads_prompt_from_stdin(self):
         config = Config()

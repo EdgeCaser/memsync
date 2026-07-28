@@ -184,6 +184,60 @@ class TestProjectCommand:
         assert not legacy.exists()
 
 
+class TestHarvestHealthInStatus:
+    """
+    Two nightly harvests died in a row without anyone noticing: every backend
+    was down, and the Slack alert meant to catch that was itself failing
+    silently. Nothing distinguished "quiet because there was nothing to do"
+    from "quiet because it is broken".
+    """
+
+    @staticmethod
+    def _log(root, hours_ago, machine="pi"):
+        import json
+        from datetime import UTC, datetime, timedelta
+        ts = (datetime.now(UTC) - timedelta(hours=hours_ago)).isoformat()
+        (root / "usage.jsonl").write_text(
+            json.dumps({"ts": ts, "machine": machine, "command": "harvest"}) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_warns_when_no_harvest_has_succeeded_recently(self, store_config, capsys):
+        from memsync.cli import _print_harvest_health
+        config, root = store_config
+        self._log(root, hours_ago=50)
+        _print_harvest_health(config, root)
+        out = capsys.readouterr().out
+        assert "STALE" in out
+        assert "2 days ago" in out
+
+    def test_quiet_when_a_harvest_landed_recently(self, store_config, capsys):
+        from memsync.cli import _print_harvest_health
+        config, root = store_config
+        self._log(root, hours_ago=3)
+        _print_harvest_health(config, root)
+        out = capsys.readouterr().out
+        assert "STALE" not in out
+        assert "3h ago" in out
+
+    def test_says_so_when_nothing_has_ever_harvested(self, store_config, capsys):
+        from memsync.cli import _print_harvest_health
+        config, root = store_config
+        _print_harvest_health(config, root)
+        assert "never" in capsys.readouterr().out
+
+    def test_threshold_of_zero_disables_the_warning(self, store_config, capsys):
+        import dataclasses
+        from memsync.cli import _print_harvest_health
+        config, root = store_config
+        self._log(root, hours_ago=500)
+        config = dataclasses.replace(
+            config, daemon=dataclasses.replace(config.daemon, harvest_stale_hours=0)
+        )
+        _print_harvest_health(config, root)
+        assert "STALE" not in capsys.readouterr().out
+
+
 def _run_git(root, *args):
     subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True, text=True

@@ -7,9 +7,70 @@ from memsync.usage import (
     _price_for_model,
     append_usage,
     format_summary,
+    last_successful_harvest,
     load_usage,
     usage_log_path,
 )
+
+
+class TestLastSuccessfulHarvest:
+    """
+    A harvest that fails writes no usage record, so the timestamp going stale
+    IS the failure signal. Two consecutive nights of dead harvests went
+    unnoticed because nothing surfaced this; the alert meant to catch it was
+    also broken, and silence read as health.
+    """
+
+    @staticmethod
+    def _write(root, records):
+        (root / "usage.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    def test_returns_the_most_recent_across_machines(self, tmp_path):
+        # Any machine harvesting keeps the memory fed. On a setup where one
+        # always-on host does the work, asking only about *this* machine would
+        # report stale on every laptop while everything is fine.
+        self._write(tmp_path, [
+            {"ts": "2026-07-01T10:00:00+00:00", "machine": "pi", "command": "harvest"},
+            {"ts": "2026-07-27T09:00:00+00:00", "machine": "laptop", "command": "harvest"},
+            {"ts": "2026-07-20T10:00:00+00:00", "machine": "pi", "command": "harvest"},
+        ])
+        machine, ts = last_successful_harvest(tmp_path)
+        assert machine == "laptop"
+        assert ts.isoformat() == "2026-07-27T09:00:00+00:00"
+
+    def test_ignores_other_commands(self, tmp_path):
+        # A refresh is not a harvest; counting it would mask a dead harvest.
+        self._write(tmp_path, [
+            {"ts": "2026-07-01T10:00:00+00:00", "machine": "pi", "command": "harvest"},
+            {"ts": "2026-07-27T10:00:00+00:00", "machine": "pi", "command": "refresh"},
+        ])
+        machine, ts = last_successful_harvest(tmp_path)
+        assert ts.isoformat() == "2026-07-01T10:00:00+00:00"
+
+    def test_no_log_returns_none(self, tmp_path):
+        assert last_successful_harvest(tmp_path) is None
+
+    def test_no_harvest_records_returns_none(self, tmp_path):
+        self._write(tmp_path, [
+            {"ts": "2026-07-27T10:00:00+00:00", "machine": "pi", "command": "refresh"},
+        ])
+        assert last_successful_harvest(tmp_path) is None
+
+    def test_survives_malformed_and_undated_records(self, tmp_path):
+        # This log is append-only from several machines at once; a torn line
+        # must not take out the health signal.
+        (tmp_path / "usage.jsonl").write_text(
+            '{"ts": "2026-07-01T10:00:00+00:00", "machine": "pi", "command": "harvest"}\n'
+            "{not json at all\n"
+            '{"machine": "pi", "command": "harvest"}\n'
+            '{"ts": "nonsense", "machine": "pi", "command": "harvest"}\n',
+            encoding="utf-8",
+        )
+        machine, ts = last_successful_harvest(tmp_path)
+        assert machine == "pi"
+        assert ts.isoformat() == "2026-07-01T10:00:00+00:00"
 
 
 class TestPriceForModel:

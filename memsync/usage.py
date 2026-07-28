@@ -80,6 +80,35 @@ def load_usage(memory_root: Path) -> list[dict]:
     return entries
 
 
+def last_successful_harvest(memory_root: Path) -> tuple[str, datetime] | None:
+    """
+    When a harvest last actually wrote something, and from which machine.
+
+    A harvest that fails writes no usage record, so this timestamp going stale
+    is itself the failure signal — the one number that distinguishes "nothing
+    to harvest" from "the harvest has been dead for two nights". Returns None
+    when nothing has ever harvested.
+
+    Reported across all machines rather than for this one: where a single
+    always-on host does the harvesting, asking only about the local machine
+    would report stale on every laptop while the setup is working correctly.
+    """
+    newest: tuple[str, datetime] | None = None
+    for entry in load_usage(memory_root):
+        if entry.get("command") != "harvest":
+            continue
+        raw = entry.get("ts")
+        if not raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            continue
+        if newest is None or ts > newest[1]:
+            newest = (entry.get("machine", "unknown"), ts)
+    return newest
+
+
 def format_summary(entries: list[dict]) -> str:
     if not entries:
         return "No usage recorded yet."

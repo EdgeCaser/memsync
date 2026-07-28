@@ -1125,7 +1125,44 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
         sessions = list(session_dir.glob("*.md"))
         print(f"Session logs:  {len(sessions)} day(s)")
 
+    _print_harvest_health(config, memory_root)
+
     return 0
+
+
+def _print_harvest_health(config: Config, memory_root: Path) -> None:
+    """
+    Say when a harvest last actually wrote something, and complain if that was
+    a while ago.
+
+    This exists because two consecutive nightly harvests died without anyone
+    noticing. Every backend was down, the Slack alert meant to catch exactly
+    that was itself failing silently, and nothing else in the tool distinguished
+    "quiet because there was nothing to do" from "quiet because it is broken".
+    A status command that cannot answer "is this thing still running" is not
+    reporting status.
+    """
+    from datetime import UTC, datetime
+
+    from memsync.usage import last_successful_harvest
+
+    latest = last_successful_harvest(memory_root)
+    if latest is None:
+        print("Last harvest:  never — no harvest has written to this memory")
+        return
+
+    machine, ts = latest
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    hours = (datetime.now(UTC) - ts).total_seconds() / 3600
+    when = f"{hours:.0f}h ago" if hours < 48 else f"{hours / 24:.0f} days ago"
+
+    stale_after = getattr(getattr(config, "daemon", None), "harvest_stale_hours", 36)
+    mark = " ⚠ STALE" if stale_after and hours > stale_after else " ✓"
+    print(f"Last harvest:  {ts:%Y-%m-%d %H:%M} on {machine} ({when}){mark}")
+    if stale_after and hours > stale_after:
+        print(f"               No successful harvest in {stale_after}h. Check the "
+              f"harvest log and backend auth.")
 
 
 # Commands that write the shared store, and so are worth a commit. `project`
