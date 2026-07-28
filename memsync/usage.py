@@ -48,6 +48,7 @@ def append_usage(
     changed: bool = False,
     backend: str = "",
     duration_ms: int = 0,
+    dry_run: bool = False,
 ) -> None:
     """
     Append one usage record to usage.jsonl (synced, append-only).
@@ -57,7 +58,14 @@ def append_usage(
     cost but not why a run took thirty minutes for twenty-four sessions, which
     is a question that stayed unanswerable through a whole debugging session.
     Both are optional so older readers and older records still parse.
+
+    dry_run makes this a no-op. The check lives here rather than at each call
+    site because callers kept forgetting: both refresh and harvest appended a
+    usage record *before* testing the flag, so a preview mutated the synced log
+    and got swept into somebody else's commit.
     """
+    if dry_run:
+        return
     entry = {
         "ts": datetime.now(UTC).isoformat(),
         "machine": socket.gethostname(),
@@ -78,7 +86,9 @@ def append_usage(
         f.write(json.dumps(entry) + "\n")
 
 
-def append_run(memory_root: Path, command: str, **fields: object) -> None:
+def append_run(
+    memory_root: Path, command: str, dry_run: bool = False, **fields: object
+) -> None:
     """
     Record that a whole run finished, alongside the per-call records.
 
@@ -86,7 +96,11 @@ def append_run(memory_root: Path, command: str, **fields: object) -> None:
     did it achieve" — a run that fails every session writes no per-call records
     at all, which is exactly the shape of the two nights that went unnoticed.
     This writes one line per run regardless of outcome.
+
+    dry_run makes this a no-op, for the same reason as append_usage.
     """
+    if dry_run:
+        return
     entry = {
         "ts": datetime.now(UTC).isoformat(),
         "machine": socket.gethostname(),

@@ -173,6 +173,28 @@ class TestAppendUsage:
         assert json.loads(lines[0])["command"] == "refresh"
         assert json.loads(lines[1])["command"] == "harvest"
 
+    def test_dry_run_writes_nothing(self, tmp_path):
+        # refresh and harvest both appended their record *before* testing the
+        # flag, so a preview mutated the synced log and got swept into an
+        # unrelated commit. The guard lives in the write path, not the callers.
+        append_usage(
+            tmp_path, "refresh", "claude-sonnet-4-20250514", 100, 50, dry_run=True,
+        )
+        assert not (tmp_path / "usage.jsonl").exists()
+
+    def test_dry_run_does_not_disturb_an_existing_log(self, tmp_path):
+        append_usage(tmp_path, "refresh", "claude-sonnet-4-20250514", 100, 50)
+        before = (tmp_path / "usage.jsonl").read_bytes()
+        append_usage(
+            tmp_path, "harvest", "claude-sonnet-4-20250514", 1, 1, dry_run=True,
+        )
+        assert (tmp_path / "usage.jsonl").read_bytes() == before
+
+    def test_append_run_honours_dry_run(self, tmp_path):
+        from memsync.usage import append_run
+        append_run(tmp_path, "harvest", dry_run=True, sessions=3, updated=0, errors=0)
+        assert not (tmp_path / "usage.jsonl").exists()
+
     def test_records_session_id_and_changed(self, tmp_path):
         append_usage(
             tmp_path, "harvest", "claude-sonnet-4-20250514",

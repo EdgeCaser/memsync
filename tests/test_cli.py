@@ -1870,6 +1870,62 @@ class TestHarvestAllNonAuto:
         assert index == {}, "a malformed merge must not mark its batch harvested"
         assert result == 1
 
+    def _snapshot(self, root: Path) -> dict[str, bytes]:
+        """Every file under the memory root, by content. A dry run must not
+        change this — that is the backlog's own definition of done."""
+        return {
+            str(p.relative_to(root)): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()
+        }
+
+    def test_dry_run_makes_no_backend_calls(self, memory_file, monkeypatch, capsys):
+        # The bug: --dry-run parsed but nothing read it, so the sweep ran for
+        # real — LLM calls, memory write, commit and push.
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path, n_sessions=3)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        with patch("memsync.cli.harvest_sessions_batched") as batched:
+            result = _harvest_all(
+                _harvest_args(auto=False, dry_run=True), config, memory_root, global_memory,
+            )
+
+        batched.assert_not_called()
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "DRY RUN" in out
+        assert "Would harvest 3 session(s)" in out
+
+    def test_dry_run_leaves_the_memory_root_byte_identical(self, memory_file, monkeypatch, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path, n_sessions=2)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        before = self._snapshot(memory_root)
+        with patch("memsync.cli.harvest_sessions_batched",
+                   return_value=self._mock_result(changed=True)):
+            _harvest_all(
+                _harvest_args(auto=True, dry_run=True), config, memory_root, global_memory,
+            )
+        assert self._snapshot(memory_root) == before
+
+    def test_dry_run_takes_no_lock(self, memory_file, monkeypatch, capsys):
+        # An interrupted preview used to strand a lock file that blocked real
+        # harvests until it aged out.
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path, n_sessions=1)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        with patch("memsync.lock.store_lock") as lock:
+            _harvest_all(
+                _harvest_args(auto=False, dry_run=True), config, memory_root, global_memory,
+            )
+        lock.assert_not_called()
+        assert not (memory_root / ".harvest.lock").exists()
+
     def test_batch_merge_failure_is_reported_not_swallowed(self, memory_file, monkeypatch, capsys):
         config, tmp_path, global_memory = memory_file
         memory_root = config.sync_root / ".claude-memory"

@@ -454,6 +454,7 @@ def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
         input_tokens=result.get("input_tokens", 0),
         output_tokens=result.get("output_tokens", 0),
         changed=result.get("changed", False),
+        dry_run=args.dry_run,
     )
 
     if args.dry_run:
@@ -554,6 +555,12 @@ def _harvest_all(
     message rather than racing it."""
     from memsync.lock import DEFAULT_STALE_SECONDS, LockHeld, store_lock
 
+    # A dry run writes nothing, so it neither needs the lock nor should risk
+    # leaving one behind. Taking it meant an interrupted preview stranded a lock
+    # file that blocked real harvests until it aged out.
+    if args.dry_run:
+        return _harvest_all_locked(args, config, memory_root, global_memory)
+
     stale = getattr(
         getattr(config, "daemon", None), "harvest_lock_stale_seconds", DEFAULT_STALE_SECONDS
     )
@@ -643,6 +650,29 @@ def _harvest_all_locked(
         if max_sessions > 0 and len(new_sessions) > max_sessions:
             new_sessions = new_sessions[:max_sessions]
         config = _scheduled_harvest_config(config)
+
+    if args.dry_run:
+        # This path ignored --dry-run entirely: the flag parsed, nothing read
+        # it, and the sweep ran for real — LLM calls, memory write, commit and
+        # push. The most expensive command in the tool had an inert safety flag.
+        #
+        # Previewing stops here rather than extracting: extraction is the part
+        # that costs money and time, and what a preview is actually asked is
+        # "what would this touch", which is already known.
+        cap = config.daemon.harvest_max_sessions_per_run
+        print("\n[DRY RUN] Nothing written, no backend calls made.\n")
+        print(f"Would harvest {len(new_sessions)} session(s):")
+        for session_path in new_sessions[:20]:
+            _, count = read_session_transcript(session_path)
+            print(f"  {session_path.stem}  ({count} message(s))")
+        if len(new_sessions) > 20:
+            print(f"  ... and {len(new_sessions) - 20} more")
+        if args.auto and cap > 0 and len(new_sessions) == cap:
+            print(f"\n  Capped at harvest_max_sessions_per_run = {cap}.")
+        runtime = config.daemon.harvest_max_runtime_seconds
+        if runtime > 0:
+            print(f"  Runtime budget {runtime}s may stop the run before the last session.")
+        return 0
 
     current_memory = load_or_init_memory(global_memory)
     archive_path = memory_root / "MEMORY_ARCHIVE.md"
@@ -965,6 +995,7 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         output_tokens=result.get("output_tokens", 0),
         session_id=session_path.stem,
         changed=result.get("changed", False),
+        dry_run=args.dry_run,
     )
 
     if args.dry_run:
