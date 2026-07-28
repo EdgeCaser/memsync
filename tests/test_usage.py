@@ -13,6 +13,45 @@ from memsync.usage import (
 )
 
 
+class TestTelemetry:
+    def test_records_backend_and_duration_when_given(self, tmp_path):
+        append_usage(tmp_path, "harvest", "m", 1, 1, backend="gemini", duration_ms=4200)
+        entry = load_usage(tmp_path)[0]
+        assert entry["backend"] == "gemini"
+        assert entry["duration_ms"] == 4200
+
+    def test_omits_them_when_absent_so_old_readers_still_parse(self, tmp_path):
+        append_usage(tmp_path, "harvest", "m", 1, 1)
+        entry = load_usage(tmp_path)[0]
+        assert "backend" not in entry
+        assert "duration_ms" not in entry
+
+    def test_a_run_is_recorded_even_when_every_session_failed(self, tmp_path):
+        # The exact shape of a night that dies silently: no per-session records
+        # are written at all, so without this the run leaves no trace.
+        from memsync.usage import append_run
+        append_run(tmp_path, "harvest", sessions=14, updated=0, errors=14, duration_ms=180_000)
+        entry = load_usage(tmp_path)[0]
+        assert entry["command"] == "harvest_run"
+        assert (entry["sessions"], entry["updated"], entry["errors"]) == (14, 0, 14)
+
+    def test_summary_reports_runs_and_backend_medians(self, tmp_path):
+        from memsync.usage import append_run, format_telemetry
+        append_run(tmp_path, "harvest", sessions=3, updated=2, errors=1, duration_ms=60_000)
+        for ms in (1000, 3000, 11000):
+            append_usage(tmp_path, "harvest", "m", 1, 1, backend="claude_code", duration_ms=ms)
+        out = format_telemetry(tmp_path)
+        assert "3 seen" in out and "2 updated" in out and "1 errors" in out
+        assert "claude_code" in out
+        assert "3.0s" in out  # median of 1/3/11s, not the 5.0s mean
+
+    def test_summary_is_calm_when_there_is_nothing_yet(self, tmp_path):
+        from memsync.usage import format_telemetry
+        out = format_telemetry(tmp_path)
+        assert "none recorded yet" in out
+        assert "no timed calls recorded yet" in out
+
+
 class TestLastSuccessfulHarvest:
     """
     A harvest that fails writes no usage record, so the timestamp going stale

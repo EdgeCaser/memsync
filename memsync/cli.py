@@ -663,6 +663,7 @@ def _harvest_all_locked(
             time.sleep(config.chunk_inter_call_sleep)
         _first_call = False
 
+        call_started = time.monotonic()
         try:
             result = harvest_memory_content(transcript, current_memory, config, current_cold)
         except LLMError as e:
@@ -670,6 +671,7 @@ def _harvest_all_locked(
             errors += 1
             error_sessions.append((session_path.stem, f"all backends failed: {str(e)[:120]}"))
             continue  # not marked — will retry on next run
+        call_ms = int((time.monotonic() - call_started) * 1000)
 
         try:
             append_usage(
@@ -680,6 +682,8 @@ def _harvest_all_locked(
                 output_tokens=result.get("output_tokens", 0),
                 session_id=session_path.stem,
                 changed=result.get("changed", False),
+                backend=result.get("backend", ""),
+                duration_ms=call_ms,
             )
         except OSError as e:
             logger.warning("Failed to write usage log: %s", e)
@@ -762,6 +766,20 @@ def _harvest_all_locked(
         print(summary)
         for sid, reason in error_sessions:
             print(f"  - {sid}: {reason}")
+
+    # One line per run, written whatever the outcome. A run that fails every
+    # session writes no per-session records at all, which is precisely the shape
+    # of a night that dies silently — so the run record is the only thing that
+    # can say "it ran, and achieved nothing".
+    from memsync.usage import append_run
+    append_run(
+        memory_root,
+        "harvest",
+        sessions=len(new_sessions),
+        updated=updated_count,
+        errors=errors,
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+    )
 
     # Exit non-zero only on total failure — a run that errored on some sessions
     # but still updated memory is a partial success, not a failure. One bad
@@ -986,6 +1004,50 @@ def cmd_usage(args: argparse.Namespace, config: Config) -> int:
     print(f"Entries:   {len(entries)}\n")
     print(format_summary(entries))
     return 0
+
+
+def cmd_telemetry(args: argparse.Namespace, config: Config) -> int:
+    """Show recent run outcomes and per-backend latencies."""
+    from memsync.usage import format_telemetry
+
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+    print(format_telemetry(memory_root, limit=getattr(args, "limit", 10)))
+    return 0
+
+
+def probe_backends(config: Config) -> list[tuple[str, bool, str]]:
+    """
+    Ask every configured backend for one short answer, and time it.
+
+    `doctor` otherwise checks only that a backend is *installed*, which is a
+    different question from whether it *works*: on 2026-07-27 all four were
+    installed and all four were dead — a model the provider had retired, two
+    expired credentials, and a timeout too short to ever succeed. Readiness
+    checks reported everything fine. Finding the truth took hours; this makes
+    it one command, at the cost of a real call per backend.
+    """
+    import time as _time
+
+    from memsync.llm import call_llm_with_backend
+
+    results: list[tuple[str, bool, str]] = []
+    for backend in _configured_backends(config):
+        started = _time.monotonic()
+        try:
+            call_llm_with_backend(
+                backend, "Reply with exactly: OK", "Reply with exactly: OK", "", config
+            )
+        except Exception as exc:  # noqa: BLE001
+            results.append(
+                (backend, False, " ".join(str(exc).split())[:110])
+            )
+        else:
+            results.append(
+                (backend, True, f"answered in {_time.monotonic() - started:.1f}s")
+            )
+    return results
 
 
 def cmd_show(args: argparse.Namespace, config: Config) -> int:
@@ -1734,9 +1796,17 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
         global_memory = memory_root / "GLOBAL_MEMORY.md"
         checks.append(("GLOBAL_MEMORY.md", global_memory.exists(), str(global_memory)))
 
+        # Compare against whatever _sync_instruction_targets actually writes.
+        # With projection on that is the generated core, not GLOBAL_MEMORY.md —
+        # checking the source instead reported every projection-enabled install
+        # as broken, and a health check that always fails is not one.
         from memsync.claude_md import is_synced
+        expected_source = global_memory
+        if config.projection_enabled:
+            from memsync.projection import core_path
+            expected_source = core_path(config)
         for label, target in _instruction_targets(config):
-            synced = global_memory.exists() and is_synced(global_memory, target)
+            synced = expected_source.exists() and is_synced(expected_source, target)
             detail = f"{target} → {'synced' if synced else 'not synced (run memsync init)'}"
             checks.append((f"{label} synced", synced, detail))
     else:
@@ -1781,6 +1851,28 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
     for label, ok, detail in checks:
         marker = "✓" if ok else "✗"
         print(f"  {marker}  {label:<25} {detail}")
+
+    # --probe turns "is it installed" into "does it answer". Off by default
+    # because it spends a real call per backend; worth every one of them when a
+    # harvest has gone quiet, since a readiness check cannot tell a live
+    # backend from a retired model or an expired token.
+    if getattr(args, "probe", False):
+        print("\n  Probing backends (one real call each):")
+        alive = 0
+        for backend, ok, detail in probe_backends(config):
+            print(f"  {'✓' if ok else '✗'}  {_display_backend_name(backend):<25} {detail}")
+            alive += bool(ok)
+        if not alive:
+            checks.append(("Backends answering", False, "none — harvest cannot work"))
+            all_ok = False
+        else:
+            print(f"\n  {alive} backend(s) answering.")
+
+    # Harvest liveness. A memory that stopped being fed two nights ago looks
+    # exactly like a healthy one from every other check here.
+    memory_root_for_harvest = _resolve_memory_root(config)
+    if memory_root_for_harvest is not None:
+        _print_harvest_health(config, memory_root_for_harvest)
 
     print()
     if all_ok:
@@ -2396,6 +2488,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_usage = subparsers.add_parser("usage", help="Show API usage and estimated cost")
     p_usage.set_defaults(func=cmd_usage)
 
+    p_telemetry = subparsers.add_parser(
+        "telemetry", help="Recent run outcomes and per-backend latencies"
+    )
+    p_telemetry.add_argument(
+        "--limit", type=int, default=10, help="How many recent runs to show (default 10)"
+    )
+    p_telemetry.set_defaults(func=cmd_telemetry)
+
+
     # show
     p_show = subparsers.add_parser("show", help="Print current global memory")
     p_show.add_argument(
@@ -2495,6 +2596,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # doctor
     p_doctor = subparsers.add_parser("doctor", help="Self-check: verify installation health")
+    p_doctor.add_argument(
+        "--probe",
+        action="store_true",
+        help=(
+            "Also make one real call per backend. Checks that they answer, not "
+            "merely that they are installed — the difference between a healthy "
+            "waterfall and four dead ones."
+        ),
+    )
     p_doctor.set_defaults(func=cmd_doctor)
 
     # config

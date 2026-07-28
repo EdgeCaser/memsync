@@ -46,8 +46,18 @@ def append_usage(
     output_tokens: int,
     session_id: str = "",
     changed: bool = False,
+    backend: str = "",
+    duration_ms: int = 0,
 ) -> None:
-    """Append one usage record to usage.jsonl (synced, append-only)."""
+    """
+    Append one usage record to usage.jsonl (synced, append-only).
+
+    `backend` and `duration_ms` are the telemetry half: which backend actually
+    answered, and how long it took. Without them the log can say what a harvest
+    cost but not why a run took thirty minutes for twenty-four sessions, which
+    is a question that stayed unanswerable through a whole debugging session.
+    Both are optional so older readers and older records still parse.
+    """
     entry = {
         "ts": datetime.now(UTC).isoformat(),
         "machine": socket.gethostname(),
@@ -59,9 +69,36 @@ def append_usage(
         "cost_usd": round(_cost(model, input_tokens, output_tokens), 6),
         "changed": changed,
     }
+    if backend:
+        entry["backend"] = backend
+    if duration_ms:
+        entry["duration_ms"] = duration_ms
     path = usage_log_path(memory_root)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+def append_run(memory_root: Path, command: str, **fields: object) -> None:
+    """
+    Record that a whole run finished, alongside the per-call records.
+
+    Per-call records cannot answer "did last night's harvest finish, and what
+    did it achieve" — a run that fails every session writes no per-call records
+    at all, which is exactly the shape of the two nights that went unnoticed.
+    This writes one line per run regardless of outcome.
+    """
+    entry = {
+        "ts": datetime.now(UTC).isoformat(),
+        "machine": socket.gethostname(),
+        "command": f"{command}_run",
+        **fields,
+    }
+    path = usage_log_path(memory_root)
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass  # telemetry must never take down the work it is measuring
 
 
 def load_usage(memory_root: Path) -> list[dict]:
@@ -107,6 +144,62 @@ def last_successful_harvest(memory_root: Path) -> tuple[str, datetime] | None:
         if newest is None or ts > newest[1]:
             newest = (entry.get("machine", "unknown"), ts)
     return newest
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if not ordered:
+        return 0.0
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def format_telemetry(memory_root: Path, limit: int = 10) -> str:
+    """
+    Recent runs and per-backend timings.
+
+    Medians, not means: one 400-second outlier from a backend timing out drags a
+    mean somewhere no individual call ever was, and the question this answers is
+    "what does a typical call cost me", not "what was the total".
+    """
+    entries = load_usage(memory_root)
+    runs = [e for e in entries if str(e.get("command", "")).endswith("_run")]
+    calls = [e for e in entries if e.get("duration_ms")]
+
+    lines: list[str] = []
+    lines.append(f"Recent runs (last {limit}):")
+    if not runs:
+        lines.append("  none recorded yet — runs are logged from this version on")
+    for entry in runs[-limit:][::-1]:
+        ts = str(entry.get("ts", ""))[:16].replace("T", " ")
+        secs = float(entry.get("duration_ms", 0)) / 1000
+        lines.append(
+            f"  {ts}  {entry.get('machine', '?'):<16} "
+            f"{entry.get('command', '?'):<14} "
+            f"{entry.get('sessions', 0):>3} seen  "
+            f"{entry.get('updated', 0):>3} updated  "
+            f"{entry.get('errors', 0):>3} errors  "
+            f"{secs:>6.0f}s"
+        )
+
+    lines.append("")
+    lines.append("Per-backend call latency:")
+    if not calls:
+        lines.append("  no timed calls recorded yet")
+    by_backend: dict[str, list[float]] = {}
+    for entry in calls:
+        by_backend.setdefault(str(entry.get("backend", "unknown")), []).append(
+            float(entry["duration_ms"])
+        )
+    for backend, durations in sorted(by_backend.items(), key=lambda kv: -len(kv[1])):
+        lines.append(
+            f"  {backend:<14} {len(durations):>5} calls   "
+            f"median {_median(durations) / 1000:>6.1f}s   "
+            f"slowest {max(durations) / 1000:>6.1f}s"
+        )
+    return "\n".join(lines)
 
 
 def format_summary(entries: list[dict]) -> str:

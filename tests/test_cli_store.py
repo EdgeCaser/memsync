@@ -184,6 +184,25 @@ class TestProjectCommand:
         assert not legacy.exists()
 
 
+class TestDoctorSyncCheckUnderProjection:
+    def test_does_not_report_a_projected_claude_md_as_unsynced(self, store_config, capsys):
+        # With projection on, CLAUDE.md is deliberately the generated core, not
+        # GLOBAL_MEMORY.md. Comparing it against the source made doctor report a
+        # failure on every projection-enabled install and exit 1 forever, which
+        # would make it useless as the scheduled health check it is meant to be.
+        from memsync.cli import cmd_doctor, cmd_project
+        config, _ = store_config
+        config = Config(**{**config.__dict__, "projection_enabled": True})
+        assert cmd_project(_args(dry_run=False, force=False), config) == 0
+        capsys.readouterr()
+
+        cmd_doctor(_args(probe=False), config)
+        out = capsys.readouterr().out
+        claude_line = [ln for ln in out.splitlines() if "CLAUDE.md synced" in ln]
+        assert claude_line, "doctor should report on CLAUDE.md"
+        assert "✗" not in claude_line[0], claude_line[0]
+
+
 class TestHarvestHealthInStatus:
     """
     Two nightly harvests died in a row without anyone noticing: every backend
