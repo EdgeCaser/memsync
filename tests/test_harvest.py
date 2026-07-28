@@ -903,6 +903,49 @@ class TestBatchedHarvest:
 
         assert sleeps == []  # an empty transcript issues no call to pace against
 
+    def test_merge_ms_times_the_merge_not_the_whole_batch(self):
+        # The first batched run recorded a "738s merge" inside a 742s run. The
+        # caller was timing the outer call and labelling the total "merge", so
+        # the number named one thing and measured another — the same defect
+        # this audit keeps finding. merge_ms must exclude extraction.
+        import time as _time
+        from memsync.sync import harvest_sessions_batched
+
+        config = dataclasses.replace(Config(), chunk_inter_call_sleep=0)
+
+        def slow_extract(transcript, cfg):
+            _time.sleep(0.05)
+            return self._ok_extract(transcript, cfg)
+
+        def fast_merge(candidates, memory, cfg, cold):
+            return self._ok_merge(candidates, memory, cfg, cold)
+
+        with patch("memsync.sync.extract_candidates_from_chunk", side_effect=slow_extract):
+            with patch("memsync.sync.merge_candidates_into_memory", side_effect=fast_merge):
+                result = harvest_sessions_batched(
+                    [("a", "t"), ("b", "t"), ("c", "t")], "# Mem\n", config, "",
+                )
+
+        # 3 x 50ms of extraction must not be attributed to the merge.
+        assert result["extract_ms"] >= 100
+        assert result["merge_ms"] < result["extract_ms"]
+
+    def test_no_merge_reports_zero_not_a_fast_merge(self):
+        from memsync.sync import harvest_sessions_batched
+
+        config = dataclasses.replace(Config(), chunk_inter_call_sleep=0)
+
+        def empty_extract(transcript, cfg):
+            return {"candidates": "", "truncated": False, "input_tokens": 0,
+                    "output_tokens": 0, "backend": "x", "chunks_processed": 1}
+
+        with patch("memsync.sync.extract_candidates_from_chunk", side_effect=empty_extract):
+            with patch("memsync.sync.merge_candidates_into_memory") as merge:
+                result = harvest_sessions_batched([("a", "t")], "# Mem\n", config, "")
+
+        merge.assert_not_called()
+        assert result["merge_ms"] == 0
+
     def test_a_raising_observer_does_not_take_down_the_harvest(self):
         from memsync.sync import harvest_sessions_batched
 

@@ -745,7 +745,6 @@ def _harvest_all_locked(
     if not args.auto:
         print(f"Extracting from {len(sessions)} session(s), then merging once...")
 
-    merge_started = time.monotonic()
     try:
         result = harvest_sessions_batched(
             sessions,
@@ -791,7 +790,11 @@ def _harvest_all_locked(
                     session_id="(merge)",
                     changed=result.get("changed", False),
                     backend=result.get("backend", ""),
-                    duration_ms=int((time.monotonic() - merge_started) * 1000),
+                    # The merge alone, timed inside harvest_sessions_batched.
+                    # Timing the outer call here recorded extraction and pacing
+                    # under the name "merge" — 738s of a 742s run, when the
+                    # merge was ~190s of it.
+                    duration_ms=result.get("merge_ms", 0),
                 )
             except OSError as e:
                 logger.warning("Failed to write usage log: %s", e)

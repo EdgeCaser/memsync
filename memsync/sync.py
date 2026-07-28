@@ -608,6 +608,7 @@ def harvest_sessions_batched(
     failed_ids: list[tuple[str, str]] = []
     extract_input = 0
     extract_output = 0
+    extract_ms = 0
     extracted_any = False  # gates inter-session pacing; empties must not count
 
     def _notify(sid: str, ext: dict | None, ms: int, status: str) -> None:
@@ -650,7 +651,9 @@ def harvest_sessions_batched(
             _notify(session_id, None, int((time.monotonic() - started) * 1000), "failed")
             extracted_any = True  # a failed attempt still consumed rate budget
             continue  # not marked harvested
-        _notify(session_id, ext, int((time.monotonic() - started) * 1000), "extracted")
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        _notify(session_id, ext, elapsed_ms, "extracted")
+        extract_ms += elapsed_ms
         extracted_any = True
         extract_input += ext["input_tokens"]
         extract_output += ext["output_tokens"]
@@ -674,9 +677,19 @@ def harvest_sessions_batched(
             "chunks_processed": 0,
             "harvested_ids": harvested_ids,
             "failed_ids": failed_ids,
+            "merge_ms": 0,  # no merge happened; must not read as a fast one
+            "extract_ms": extract_ms,
         }
 
+    merge_started = time.monotonic()
     result = merge_candidates_into_memory(combined, current_memory, config, current_cold)
+    # Timed here rather than around the whole batched call. A caller timing the
+    # outer call records extraction + pacing + merge and labels the total
+    # "merge", which is the same defect this audit keeps finding: a number that
+    # reports something other than what it names. On the first batched run that
+    # read as a 738s merge inside a 742s run, when the merge was ~190s of it.
+    result["merge_ms"] = int((time.monotonic() - merge_started) * 1000)
+    result["extract_ms"] = extract_ms
     result["input_tokens"] = result.get("input_tokens", 0) + extract_input
     result["output_tokens"] = result.get("output_tokens", 0) + extract_output
     result["harvested_ids"] = harvested_ids
