@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import platform
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -9,6 +10,7 @@ import pytest
 
 from memsync.config import Config
 from memsync.harvest import (
+    HarvestIndexError,
     chunk_transcript,
     cwd_to_project_key,
     find_latest_session,
@@ -289,10 +291,31 @@ class TestHarvestIndex:
         loaded = load_harvested_index(tmp_path)
         assert loaded == original
 
-    def test_handles_corrupted_file(self, tmp_path):
+    def test_corrupted_file_raises_rather_than_reading_as_empty(self, tmp_path):
+        # An unreadable index must NOT look like "nothing harvested yet" — that
+        # silently re-harvests the entire backlog at minutes per session.
         (tmp_path / "harvested.json").write_text("not json", encoding="utf-8")
-        result = load_harvested_index(tmp_path)
-        assert result == {}
+        with pytest.raises(HarvestIndexError):
+            load_harvested_index(tmp_path)
+
+    def test_conflict_markers_are_named_in_the_error(self, tmp_path):
+        # harvested.json is git-tracked and rewritten after every session, so a
+        # merge conflict is its most likely corruption.
+        (tmp_path / "harvested.json").write_text(
+            '<<<<<<< HEAD\n{"a": 1}\n=======\n{"a": 2}\n>>>>>>> origin/master\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(HarvestIndexError, match="conflict markers"):
+            load_harvested_index(tmp_path)
+
+    def test_malformed_entries_are_logged_not_silent(self, tmp_path, caplog):
+        (tmp_path / "harvested.json").write_text(
+            '{"good": 5, "bad": "not-an-int"}', encoding="utf-8"
+        )
+        with caplog.at_level(logging.WARNING):
+            result = load_harvested_index(tmp_path)
+        assert result == {"good": 5}
+        assert "malformed" in caplog.text
 
     def test_save_is_sorted(self, tmp_path):
         save_harvested_index(tmp_path, {"ccc": 1, "aaa": 2, "bbb": 3})
@@ -314,10 +337,14 @@ class TestHarvestIndex:
         result = load_harvested_index(tmp_path)
         assert result == {"good": 5}
 
-    def test_returns_empty_dict_when_data_is_unexpected_json_type(self, tmp_path):
+    def test_unexpected_json_type_raises(self, tmp_path):
         (tmp_path / "harvested.json").write_text("null", encoding="utf-8")
-        result = load_harvested_index(tmp_path)
-        assert result == {}
+        with pytest.raises(HarvestIndexError):
+            load_harvested_index(tmp_path)
+
+    def test_absent_index_is_still_empty_not_an_error(self, tmp_path):
+        # The distinction the fix turns on: absent is legitimately empty.
+        assert load_harvested_index(tmp_path) == {}
 
 
 # ---------------------------------------------------------------------------

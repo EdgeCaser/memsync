@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import platform
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 CLAUDE_PROJECTS_DIR = Path("~/.claude/projects").expanduser()
 
@@ -134,6 +137,22 @@ def read_session_transcript(path: Path) -> tuple[str, int]:
 # Harvest index — tracks which sessions have already been processed
 # ---------------------------------------------------------------------------
 
+class HarvestIndexError(Exception):
+    """harvested.json exists but could not be read as an index.
+
+    Deliberately *not* the same condition as "the index is absent". An absent
+    index means nothing has been harvested yet and re-harvesting everything is
+    correct. A present-but-unreadable index means the record of what was already
+    done is damaged, and treating it as empty silently re-harvests the entire
+    backlog — hundreds of sessions at roughly three minutes each.
+
+    The store's .gitattributes deliberately omits harvested.json from union
+    merge so that "a genuine disagreement about its contents should stop and be
+    resolved". Conflict markers make the file invalid JSON, so this is the
+    exception that delivers that intent instead of swallowing it.
+    """
+
+
 def load_harvested_index(memory_root: Path) -> dict[str, int]:
     """
     Load the harvest index: session stem → message count at harvest time.
@@ -141,20 +160,44 @@ def load_harvested_index(memory_root: Path) -> dict[str, int]:
 
     Backward compatible with the old list format — those entries get count -1
     (meaning "harvested but message count unknown, treat as already done").
+
+    Raises HarvestIndexError if the file exists but is not readable as an index.
     """
     index_path = memory_root / "harvested.json"
     if not index_path.exists():
         return {}
+
+    raw = index_path.read_text(encoding="utf-8")
     try:
-        data = json.loads(index_path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            # Migrate old list format — count unknown
-            return {stem: -1 for stem in data if isinstance(stem, str)}
-        if isinstance(data, dict):
-            return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, int)}
-        return {}
-    except (json.JSONDecodeError, ValueError):
-        return {}
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        hint = ""
+        if "<<<<<<<" in raw or ">>>>>>>" in raw:
+            hint = (
+                " The file contains git conflict markers — resolve the conflict"
+                " in harvested.json, then re-run."
+            )
+        raise HarvestIndexError(f"{index_path} is not valid JSON: {e}.{hint}") from e
+
+    if isinstance(data, list):
+        # Migrate old list format — count unknown
+        return {stem: -1 for stem in data if isinstance(stem, str)}
+
+    if isinstance(data, dict):
+        kept = {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, int)}
+        dropped = len(data) - len(kept)
+        if dropped:
+            # Individually malformed entries only cost a re-harvest of those
+            # sessions, so they stay non-fatal — but they are never silent.
+            logger.warning(
+                "%s: ignoring %d malformed entr%s; those sessions will be re-harvested",
+                index_path, dropped, "y" if dropped == 1 else "ies",
+            )
+        return kept
+
+    raise HarvestIndexError(
+        f"{index_path} holds a JSON {type(data).__name__}, expected an object or array."
+    )
 
 
 def save_harvested_index(memory_root: Path, harvested: dict[str, int]) -> None:

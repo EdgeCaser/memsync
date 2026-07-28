@@ -202,6 +202,7 @@ def job_nightly_harvest(config: Config) -> None:
     from memsync.claude_md import sync_many
     from memsync.config import instruction_targets
     from memsync.harvest import (
+        HarvestIndexError,
         list_sessions,
         load_harvested_index,
         read_session_transcript,
@@ -253,7 +254,13 @@ def job_nightly_harvest(config: Config) -> None:
                 logger.info("nightly_harvest: skipping missing projects root %s", root)
 
         # Collect all unharvested sessions across all project subdirectories
-        harvested = load_harvested_index(memory_root)
+        try:
+            harvested = load_harvested_index(memory_root)
+        except HarvestIndexError:
+            # Skip the run rather than re-harvesting the whole backlog. The next
+            # run picks up automatically once the index is repaired.
+            logger.exception("nightly_harvest: harvest index unreadable, skipping run")
+            return
         new_sessions: list[Path] = []
         seen_stems: set[str] = set()
         for root in present:

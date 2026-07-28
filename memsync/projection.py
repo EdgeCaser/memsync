@@ -372,6 +372,38 @@ def check_budget(projection: Projection, config: Config) -> list[str]:
     return problems
 
 
+def constraints_chars(projection: Projection) -> int:
+    """Size of the hard-constraints block inside the generated core."""
+    _, sections = split_sections(projection.core)
+    return sum(len(s.text) for s in sections if s.is_constraints)
+
+
+def check_constraints_budget(projection: Projection, config: Config) -> str | None:
+    """
+    Advisory warning when the hard-constraints block passes its threshold.
+
+    Separate from check_budget on purpose. check_budget gates a write; this one
+    must never do that, because refusing to record a constraint on size grounds
+    would defeat the append-only guarantee the constraints rely on. It exists
+    only so the creep is visible while it is still cheap to consolidate —
+    constraints reached 97% of the core before anyone measured, and the core
+    budget stayed quiet throughout because it was only 41% used.
+
+    Returns None when within threshold or when the check is disabled.
+    """
+    if config.constraints_warn_chars <= 0:
+        return None
+    size = constraints_chars(projection)
+    if size <= config.constraints_warn_chars:
+        return None
+    share = 100 * size / projection.core_chars if projection.core_chars else 0
+    return (
+        f"hard constraints are {size:,} chars ({share:.0f}% of the core), over the "
+        f"{config.constraints_warn_chars:,} advisory threshold. "
+        f"Consider 'memsync dedup --subsumed', or consolidating restatements."
+    )
+
+
 def projection_root(config: Config) -> Path:
     """
     Where generated output goes. Machine-local, never the synced store.

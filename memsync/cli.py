@@ -22,6 +22,7 @@ from memsync.config import (
     normalize_backends,
 )
 from memsync.harvest import (
+    HarvestIndexError,
     find_latest_session,
     find_project_dir,
     list_sessions,
@@ -594,7 +595,16 @@ def _harvest_all_locked(
     for root in missing:
         print(f"  Skipping missing projects root {root}", file=sys.stderr)
 
-    harvested = load_harvested_index(memory_root)
+    try:
+        harvested = load_harvested_index(memory_root)
+    except HarvestIndexError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(
+            "Refusing to harvest: treating a damaged index as empty would "
+            "re-harvest every session.",
+            file=sys.stderr,
+        )
+        return 1
     new_sessions: list[Path] = []
     # Session stems are UUIDs, but the same session can appear under two roots
     # when a machine both writes locally and syncs a copy. Harvest it once.
@@ -825,7 +835,11 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
             return 4
 
     # Load harvest index
-    harvested = load_harvested_index(memory_root)
+    try:
+        harvested = load_harvested_index(memory_root)
+    except HarvestIndexError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     # Resolve session file
     if args.session:
@@ -1164,6 +1178,24 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     )
     print(f"Memory (hot):  {global_memory} {mem_marker} ({hot_lines} lines)")
 
+    if config.projection_enabled and global_memory.exists():
+        # Cheap: rebuilds the projection in memory, writes nothing.
+        from memsync.projection import (
+            build_projection,
+            check_constraints_budget,
+            topics_path,
+        )
+        try:
+            _projection = build_projection(
+                global_memory.read_text(encoding="utf-8"), config, topics_path(config)
+            )
+            _warning = check_constraints_budget(_projection, config)
+        except Exception:  # noqa: BLE001 — status must report, never fail
+            logger.debug("status: constraint budget check failed", exc_info=True)
+            _warning = None
+        if _warning:
+            print(f"⚠ Constraints:  {_warning}")
+
     archive_path = memory_root / "MEMORY_ARCHIVE.md"
     if archive_path.exists():
         cold_lines = len(archive_path.read_text(encoding="utf-8").splitlines())
@@ -1436,6 +1468,7 @@ def cmd_project(args: argparse.Namespace, config: Config) -> int:
         build_projection,
         build_skill_description,
         check_budget,
+        check_constraints_budget,
         core_path,
         skill_root,
         topics_path,
@@ -1470,6 +1503,10 @@ def cmd_project(args: argparse.Namespace, config: Config) -> int:
     if orig_chars:
         pct = 100 * (orig_chars - projection.core_chars) / orig_chars
         print(f"Resident context reduced by {pct:.0f}%.")
+
+    constraints_warning = check_constraints_budget(projection, config)
+    if constraints_warning:
+        print(f"  ! {constraints_warning}", file=sys.stderr)
 
     problems = check_budget(projection, config)
     for problem in problems:

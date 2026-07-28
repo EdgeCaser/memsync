@@ -8,6 +8,8 @@ from memsync.projection import (
     build_projection,
     build_skill_description,
     check_budget,
+    check_constraints_budget,
+    constraints_chars,
     core_path,
     describe,
     projection_root,
@@ -239,6 +241,42 @@ class TestCheckBudget:
         projection = build_projection(SAMPLE_HOT, Config())
         problems = check_budget(projection, Config(max_hot_lines=1))
         assert any("lines" in p for p in problems)
+
+
+@pytest.mark.smoke
+class TestConstraintsBudget:
+    # A core well inside core_max_chars whose constraints block dominates it —
+    # the exact shape that went unnoticed until constraints were 97% of the core.
+    BIG_CONSTRAINTS = "## Hard constraints\n" + "\n".join(
+        f"*   Constraint number {n} " + "x" * 100 for n in range(40)
+    )
+
+    def test_silent_when_within_threshold(self):
+        projection = build_projection(self.BIG_CONSTRAINTS, Config())
+        assert check_constraints_budget(projection, Config(constraints_warn_chars=100_000)) is None
+
+    def test_warns_when_over_threshold(self):
+        projection = build_projection(self.BIG_CONSTRAINTS, Config())
+        warning = check_constraints_budget(projection, Config(constraints_warn_chars=500))
+        assert warning is not None
+        assert "hard constraints" in warning
+
+    def test_zero_disables_the_check(self):
+        projection = build_projection(self.BIG_CONSTRAINTS, Config())
+        assert check_constraints_budget(projection, Config(constraints_warn_chars=0)) is None
+
+    def test_fires_while_the_core_budget_is_still_quiet(self):
+        # The whole point: core_max_chars says nothing, this says something.
+        config = Config(core_max_chars=100_000, constraints_warn_chars=500)
+        projection = build_projection(self.BIG_CONSTRAINTS, config)
+        assert check_budget(projection, config) == []
+        assert check_constraints_budget(projection, config) is not None
+
+    def test_counts_only_the_constraints_section(self):
+        hot = self.BIG_CONSTRAINTS + "\n\n### Some project\n" + "y" * 5000 + "\n"
+        projection = build_projection(hot, Config())
+        assert constraints_chars(projection) < len(hot)
+        assert constraints_chars(projection) > 3000
 
 
 @pytest.mark.smoke

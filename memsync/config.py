@@ -233,6 +233,13 @@ class Config:
     # from GLOBAL_MEMORY.md, so per-project detail stops being resident context.
     projection_enabled: bool = False
     core_max_chars: int = 30000              # enforced budget on the generated core
+    # Advisory-only threshold on the hard-constraints block, which is nearly all
+    # of the core by design and grows monotonically because constraints are
+    # append-only. core_max_chars alone cannot surface that creep: on
+    # 2026-07-27 constraints were 97% of the core while the core sat at 41% of
+    # its budget, so nothing objected. Warning, never a refusal — a constraint
+    # must never be blocked from being recorded because of its size. 0 disables.
+    constraints_warn_chars: int = 12000
     # Generated output is machine-local: it names absolute paths and every
     # machine rebuilds it, so keeping it in the synced store would both break
     # the paths elsewhere and make the files ping-pong between machines.
@@ -382,6 +389,7 @@ class Config:
             harvest_append_only_cold=core.get("harvest_append_only_cold", True),
             projection_enabled=core.get("projection_enabled", False),
             core_max_chars=core.get("core_max_chars", 30000),
+            constraints_warn_chars=core.get("constraints_warn_chars", 12000),
             projection_root=(
                 Path(core["projection_root"]).expanduser()
                 if core.get("projection_root") else None
@@ -434,6 +442,7 @@ class Config:
             f"harvest_append_only_cold = {str(self.harvest_append_only_cold).lower()}",
             f"projection_enabled = {str(self.projection_enabled).lower()}",
             f"core_max_chars = {self.core_max_chars}",
+            f"constraints_warn_chars = {self.constraints_warn_chars}",
             f"skill_enabled = {str(self.skill_enabled).lower()}",
             f'skill_name = "{self.skill_name}"',
             f"git_enabled = {str(self.git_enabled).lower()}",
