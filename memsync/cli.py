@@ -681,6 +681,7 @@ def _harvest_all_locked(
     changed_cold_any = False
     errors = 0
     updated_count = 0
+    index_dirty = False
     error_sessions: list[tuple[str, str]] = []
 
     # Read transcripts up front — local file reads, cheap relative to any LLM call.
@@ -775,9 +776,12 @@ def _harvest_all_locked(
             if not args.auto:
                 print(f"\nMerge response {reason} — nothing written; batch will retry.")
         else:
+            # Recorded in memory here, persisted only once the merged content
+            # is on disk (below). Saving the index at this point would mark
+            # sessions harvested while their facts existed only in memory.
             for sid in result.get("harvested_ids", []):
                 harvested[sid] = message_counts.get(sid, 0)
-            save_harvested_index(memory_root, harvested)
+            index_dirty = True
             updated_count = len(result.get("harvested_ids", []))
 
             try:
@@ -834,6 +838,15 @@ def _harvest_all_locked(
     else:
         if not args.auto:
             print("\nNo memory changes.")
+
+    # Only now that the merged content is durable does the index get to say
+    # these sessions are done. Anything that dies between the merge and the
+    # write above (a missing backups/ dir, a full disk) otherwise leaves the
+    # index claiming success for facts that were never written, and those
+    # sessions are never retried. Same reasoning as the malformed/truncated
+    # branch, which already declines to mark a batch it could not write.
+    if index_dirty:
+        save_harvested_index(memory_root, harvested)
 
     # Audit journal — one entry per --all sweep summarising the batch.
     from memsync.journal import log_transaction

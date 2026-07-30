@@ -1870,6 +1870,34 @@ class TestHarvestAllNonAuto:
         assert index == {}, "a malformed merge must not mark its batch harvested"
         assert result == 1
 
+    def test_failed_write_marks_nothing_harvested(self, memory_file, monkeypatch, capsys):
+        # The index used to be saved right after the merge, before the content
+        # it describes was written. A missing backups/ dir (the case on a store
+        # obtained by cloning) then crashed the write and left the batch marked
+        # done, so those sessions were never retried and their facts were lost.
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        projects_dir, _ = self._setup_project(tmp_path, n_sessions=2)
+        _redirect_projects_dir(monkeypatch, projects_dir)
+
+        before = global_memory.read_text(encoding="utf-8")
+
+        with patch("memsync.cli.harvest_sessions_batched",
+                   return_value=self._mock_result(
+                       changed=True,
+                       harvested_ids=["session-000", "session-001"])):
+            with patch("memsync.cli.read_session_transcript", return_value=("transcript", 1)):
+                with patch("memsync.cli.backup", side_effect=FileNotFoundError("no backups/")):
+                    with pytest.raises(FileNotFoundError):
+                        _harvest_all(
+                            _harvest_args(auto=True), config, memory_root, global_memory,
+                        )
+
+        index_file = memory_root / "harvested.json"
+        index = json.loads(index_file.read_text(encoding="utf-8")) if index_file.exists() else {}
+        assert index == {}, "a batch whose write failed must stay retryable"
+        assert global_memory.read_text(encoding="utf-8") == before
+
     def _snapshot(self, root: Path) -> dict[str, bytes]:
         """Every file under the memory root, by content. A dry run must not
         change this — that is the backlog's own definition of done."""
