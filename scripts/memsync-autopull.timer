@@ -1,0 +1,14 @@
+[Unit]
+Description=Check for memsync updates periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+# Catch up after the machine was asleep or off, rather than silently skipping.
+Persistent=true
+# Keep the tick off the top of the hour, where the harvest and the hourly health
+# check already sit.
+RandomizedDelaySec=90
+
+[Install]
+WantedBy=timers.target

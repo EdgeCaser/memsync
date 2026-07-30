@@ -1,0 +1,10 @@
+[Unit]
+Description=Fast-forward the memsync checkout and restart the daemon if it changed
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Installed copy, not the one inside the checkout: the script must not be
+# rewritten underneath itself by the very pull it is running.
+ExecStart=%h/.local/bin/memsync-autopull.sh
+Nice=10
