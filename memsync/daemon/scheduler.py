@@ -446,14 +446,27 @@ def job_drift_check(config: Config) -> None:
         if not memory_path.exists():
             return
 
+        # Compare against whatever _sync_instruction_targets actually writes.
+        # With projection on that is the generated core, not GLOBAL_MEMORY.md;
+        # checking the source instead reports every projection-enabled install
+        # as drifted, every interval, which trains the alert to be ignored and
+        # buries a real drift when one happens. Mirrors the health check.
+        expected_source = memory_path
+        if config.projection_enabled:
+            from memsync.projection import core_path
+            expected_source = core_path(config)
+            if not expected_source.exists():
+                return
+
         stale = [
             (label, path)
             for label, path in instruction_targets(config)
-            if not is_synced(memory_path, path)
+            if not is_synced(expected_source, path)
         ]
         if stale:
             lines = [
-                f"{label} at {path} does not match GLOBAL_MEMORY.md at {memory_path}."
+                f"{label} at {path} does not match {expected_source.name} "
+                f"at {expected_source}."
                 for label, path in stale
             ]
             notify(

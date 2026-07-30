@@ -374,6 +374,48 @@ class TestJobDriftCheck:
         with patch("memsync.claude_md.is_synced", side_effect=RuntimeError("boom")):
             job_drift_check(daemon_config)  # must not raise
 
+    def test_projection_compares_against_the_core_not_the_source(
+        self, daemon_config: Config, tmp_path: Path
+    ) -> None:
+        """With projection on, the targets are meant to point at the generated
+        core. Comparing them to GLOBAL_MEMORY.md reported drift on every run,
+        so the alert fired every interval on a correctly-synced machine."""
+        import dataclasses
+
+        cfg = dataclasses.replace(daemon_config, projection_enabled=True)
+        core = tmp_path / "CLAUDE_CORE.md"
+        core.write_text("# projected core", encoding="utf-8")
+
+        seen: list = []
+
+        def fake_is_synced(source, target):
+            seen.append(source)
+            return True
+
+        with patch("memsync.projection.core_path", return_value=core):
+            with patch("memsync.claude_md.is_synced", side_effect=fake_is_synced):
+                with patch("memsync.daemon.notify.notify") as mock_notify:
+                    job_drift_check(cfg)
+
+        mock_notify.assert_not_called()
+        assert seen, "drift check compared nothing"
+        assert all(s == core for s in seen), (
+            f"expected comparison against the core, got {set(seen)}"
+        )
+
+    def test_projection_skips_when_core_not_built_yet(
+        self, daemon_config: Config, tmp_path: Path
+    ) -> None:
+        import dataclasses
+
+        cfg = dataclasses.replace(daemon_config, projection_enabled=True)
+        missing_core = tmp_path / "not-built" / "CLAUDE_CORE.md"
+
+        with patch("memsync.projection.core_path", return_value=missing_core):
+            with patch("memsync.daemon.notify.notify") as mock_notify:
+                job_drift_check(cfg)
+                mock_notify.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # job_weekly_digest
