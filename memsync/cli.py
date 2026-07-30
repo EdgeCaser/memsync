@@ -7,6 +7,7 @@ import logging
 import platform
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from memsync import __version__
@@ -97,6 +98,53 @@ def _sync_instruction_targets(memory_path: Path, config: Config) -> None:
         source = core_path(config)
 
     sync_instruction_targets(source, [path for _, path in _instruction_targets(config)])
+
+
+def _with_store_lock(
+    config: Config,
+    memory_root: Path,
+    action: Callable[[], int],
+    *,
+    label: str,
+    quiet: bool = False,
+) -> int:
+    """
+    Run action() holding the shared-store lock.
+
+    The lock has to span read, compute and write rather than the write alone.
+    Two machines that both read GLOBAL_MEMORY.md before either writes will each
+    compute an update against the same base, and whichever writes second
+    silently discards the other's work. Guarding only the write does not stop
+    that, it just narrows the window.
+
+    Only the harvest sweep used to take this lock, so a refresh or a dedup on
+    one machine would write straight through a harvest running on another, into
+    a store that is now git-backed and surfaces the collision as a rebase
+    conflict or a lost update.
+
+    A run that finds the lock held defers and returns 0: for a shared store that
+    is a normal outcome rather than a failure, which is how the harvest sweep
+    has always treated it. The message says plainly that nothing was written, so
+    a deferral is never mistaken for a completed run.
+    """
+    from memsync.lock import DEFAULT_STALE_SECONDS, LockHeld, store_lock
+
+    stale = getattr(
+        getattr(config, "daemon", None), "harvest_lock_stale_seconds", DEFAULT_STALE_SECONDS
+    )
+    try:
+        with store_lock(memory_root, stale):
+            return action()
+    except LockHeld as exc:
+        if quiet:
+            logger.warning("%s: %s", label, exc)
+        else:
+            print(
+                f"{label} skipped: the store lock is held by {exc.host} "
+                f"(pid {exc.pid}). Nothing was written; try again once it finishes.",
+                file=sys.stderr,
+            )
+        return 0
 
 
 def _print_instruction_targets(config: Config, prefix: str = "") -> None:
@@ -394,6 +442,24 @@ def cmd_init(args: argparse.Namespace, config: Config) -> int:
 
 def cmd_refresh(args: argparse.Namespace, config: Config) -> int:
     """Merge session notes into GLOBAL_MEMORY.md via the Claude API."""
+    # A dry run writes nothing, so it neither needs the lock nor should risk
+    # stranding one, matching how the harvest sweep treats its own preview.
+    if getattr(args, "dry_run", False):
+        return _cmd_refresh_locked(args, config)
+
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+
+    return _with_store_lock(
+        config,
+        memory_root,
+        lambda: _cmd_refresh_locked(args, config),
+        label="refresh",
+    )
+
+
+def _cmd_refresh_locked(args: argparse.Namespace, config: Config) -> int:
     # Gather notes
     notes = ""
     if args.notes:
@@ -911,9 +977,31 @@ def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
         )
         return 3
 
-    # --all: sweep every project under ~/.claude/projects/
+    # --all: sweep every project under ~/.claude/projects/. That path takes the
+    # store lock itself, so it must not be wrapped again here: the lock is a
+    # file the process would find already held, by itself, and defer forever.
     if getattr(args, "all", False):
         return _harvest_all(args, config, memory_root, global_memory)
+
+    # The single-session path writes the same file with no such protection.
+    if not getattr(args, "dry_run", False):
+        return _with_store_lock(
+            config,
+            memory_root,
+            lambda: _cmd_harvest_session(args, config, memory_root, global_memory),
+            label="harvest",
+            quiet=getattr(args, "auto", False),
+        )
+    return _cmd_harvest_session(args, config, memory_root, global_memory)
+
+
+def _cmd_harvest_session(
+    args: argparse.Namespace,
+    config: Config,
+    memory_root: Path,
+    global_memory: Path,
+) -> int:
+    import datetime  # noqa: F401  (kept for parity with the caller's imports)
 
     # Resolve project dir
     if args.project:
@@ -1668,6 +1756,29 @@ def cmd_dedup(args: argparse.Namespace, config: Config) -> int:
     --semantic: LLM pass that also catches same-policy bullets phrased differently.
                 Implies --dry-run unless --apply is also given.
     """
+    memory_root, code = _require_memory_root(config)
+    if memory_root is None:
+        return code
+
+    # Semantic is preview-only unless --apply, so the writing cases are: an
+    # explicit --apply, or any non-semantic run that is not a dry run.
+    writes = (
+        getattr(args, "apply", False)
+        if getattr(args, "semantic", False)
+        else not getattr(args, "dry_run", False)
+    )
+    if not writes:
+        return _cmd_dedup_locked(args, config)
+
+    return _with_store_lock(
+        config,
+        memory_root,
+        lambda: _cmd_dedup_locked(args, config),
+        label="dedup",
+    )
+
+
+def _cmd_dedup_locked(args: argparse.Namespace, config: Config) -> int:
     from memsync.sync import _deduplicate_memory
 
     memory_root, code = _require_memory_root(config)

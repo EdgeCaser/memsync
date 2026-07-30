@@ -152,6 +152,51 @@ class TestDaemonLlmConfig:
 # ---------------------------------------------------------------------------
 
 class TestJobNightlyRefresh:
+    def _write_notes(self, daemon_config: Config) -> Path:
+        memory_root = daemon_config.sync_root / ".claude-memory"
+        today = date.today().strftime("%Y-%m-%d")
+        log = memory_root / "sessions" / f"{today}.md"
+        log.write_text("Notes worth merging.", encoding="utf-8")
+        return memory_root
+
+    def test_defers_when_another_run_holds_the_store_lock(self, daemon_config: Config) -> None:
+        """Only the harvest used to take the lock, so this job would read the
+        memory, spend a minute in the LLM while a harvest on another machine
+        wrote, then save a result computed from the pre-harvest file."""
+        import json
+        from datetime import UTC, datetime
+
+        memory_root = self._write_notes(daemon_config)
+        (memory_root / ".harvest.lock").write_text(
+            json.dumps({
+                "host": "other-machine",
+                "pid": 4242,
+                "ts": datetime.now(UTC).isoformat(),
+            }),
+            encoding="utf-8",
+        )
+        memory_path = memory_root / "GLOBAL_MEMORY.md"
+        before = memory_path.read_text(encoding="utf-8")
+
+        with patch("memsync.sync.refresh_memory_content") as mock_refresh:
+            job_nightly_refresh(daemon_config)
+
+        mock_refresh.assert_not_called()
+        assert memory_path.read_text(encoding="utf-8") == before
+        # The foreign lock must survive: stealing it would defeat the point.
+        assert json.loads(
+            (memory_root / ".harvest.lock").read_text(encoding="utf-8")
+        )["host"] == "other-machine"
+
+    def test_releases_the_lock_after_a_normal_run(self, daemon_config: Config) -> None:
+        memory_root = self._write_notes(daemon_config)
+        result = {"changed": False, "updated_content": "# Global Memory\n", "truncated": False}
+
+        with patch("memsync.sync.refresh_memory_content", return_value=result):
+            job_nightly_refresh(daemon_config)
+
+        assert not (memory_root / ".harvest.lock").exists(), "lock left behind"
+
     def test_skips_when_no_session_log(self, daemon_config: Config) -> None:
         """No session log for today → early return, no API call."""
         with patch("memsync.sync.refresh_memory_content") as mock_refresh:

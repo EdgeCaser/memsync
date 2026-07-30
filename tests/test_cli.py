@@ -169,6 +169,52 @@ class TestCmdRefresh:
         result = cmd_refresh(_args(notes="   "), config)
         assert result == 1
 
+    def _hold_lock(self, memory_root, host="other-machine"):
+        import json
+        from datetime import UTC, datetime
+
+        memory_root.mkdir(parents=True, exist_ok=True)
+        (memory_root / ".harvest.lock").write_text(
+            json.dumps({"host": host, "pid": 4242, "ts": datetime.now(UTC).isoformat()}),
+            encoding="utf-8",
+        )
+
+    def test_defers_when_the_store_lock_is_held(self, memory_file, capsys):
+        """Only the harvest sweep used to take the lock, so a refresh would
+        write straight through a harvest running on another machine."""
+        config, tmp_path, global_memory = memory_file
+        self._hold_lock(config.sync_root / ".claude-memory")
+        original = global_memory.read_text(encoding="utf-8")
+
+        with patch("memsync.cli.refresh_memory_content") as mock_refresh:
+            result = cmd_refresh(_args(notes="some notes"), config)
+
+        mock_refresh.assert_not_called()
+        assert result == 0
+        assert global_memory.read_text(encoding="utf-8") == original
+        assert "skipped" in capsys.readouterr().err.lower()
+
+    def test_dry_run_neither_takes_nor_strands_the_lock(self, memory_file, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+
+        mock_result = self._mock_refresh_result(changed=True)
+        with patch("memsync.cli.refresh_memory_content", return_value=mock_result):
+            result = cmd_refresh(_args(notes="some notes", dry_run=True), config)
+
+        assert result == 0
+        assert not (memory_root / ".harvest.lock").exists(), "preview stranded a lock"
+
+    def test_releases_the_lock_after_a_normal_run(self, memory_file, capsys):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+
+        mock_result = self._mock_refresh_result(changed=True)
+        with patch("memsync.cli.refresh_memory_content", return_value=mock_result):
+            cmd_refresh(_args(notes="some notes"), config)
+
+        assert not (memory_root / ".harvest.lock").exists(), "lock left behind"
+
     def test_dry_run_does_not_write(self, memory_file, capsys):
         config, tmp_path, global_memory = memory_file
         original = global_memory.read_text(encoding="utf-8")

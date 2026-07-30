@@ -154,22 +154,34 @@ def job_nightly_refresh(config: Config) -> None:
             return
 
         archive_path = memory_root / "MEMORY_ARCHIVE.md"
-        current_memory = memory_path.read_text(encoding="utf-8")
-        current_cold = load_or_init_archive(archive_path)
-        llm_config = _daemon_llm_config(config)
-        result = refresh_memory_content(notes, current_memory, llm_config, current_cold)
 
-        if result["changed"]:
-            backup(memory_path, memory_root / "backups")
-            memory_path.write_text(result["updated_content"], encoding="utf-8")
-            sync_many(memory_path, [path for _, path in instruction_targets(config)])
-            if result.get("changed_cold") and result.get("updated_cold"):
-                if archive_path.exists():
-                    backup(archive_path, memory_root / "backups")
-                archive_path.write_text(result["updated_cold"], encoding="utf-8")
-            logger.info("nightly_refresh: memory updated for %s", today)
-        else:
-            logger.info("nightly_refresh: no changes for %s", today)
+        # The lock spans read, merge and write. Only the harvest used to take
+        # it, so this job could read the memory, spend a minute in the LLM while
+        # a harvest on another machine wrote, and then save a result computed
+        # from the pre-harvest file, discarding that harvest with no error.
+        from memsync.lock import LockHeld, store_lock
+
+        try:
+            with store_lock(memory_root, config.daemon.harvest_lock_stale_seconds):
+                current_memory = memory_path.read_text(encoding="utf-8")
+                current_cold = load_or_init_archive(archive_path)
+                llm_config = _daemon_llm_config(config)
+                result = refresh_memory_content(notes, current_memory, llm_config, current_cold)
+
+                if result["changed"]:
+                    backup(memory_path, memory_root / "backups")
+                    memory_path.write_text(result["updated_content"], encoding="utf-8")
+                    sync_many(memory_path, [path for _, path in instruction_targets(config)])
+                    if result.get("changed_cold") and result.get("updated_cold"):
+                        if archive_path.exists():
+                            backup(archive_path, memory_root / "backups")
+                        archive_path.write_text(result["updated_cold"], encoding="utf-8")
+                    logger.info("nightly_refresh: memory updated for %s", today)
+                else:
+                    logger.info("nightly_refresh: no changes for %s", today)
+        except LockHeld as exc:
+            logger.warning("nightly_refresh: %s, skipping this run", exc)
+            return
 
         # Audit journal — log every refresh attempt, not just successful writes,
         # so the journal also captures no-op nights.
