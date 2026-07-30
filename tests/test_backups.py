@@ -38,6 +38,27 @@ class TestBackup:
         b2 = backup(source, backup_dir)
         assert b1.name != b2.name
 
+    def test_creates_backup_dir_when_missing(self, tmp_path):
+        """A store obtained by cloning has no backups/ dir: it is gitignored, and
+        only `memsync init` creates it. Every write path backs up first, so
+        backup() must create it rather than dying on the first harvest."""
+        source = tmp_path / "GLOBAL_MEMORY.md"
+        source.write_text("# memory content", encoding="utf-8")
+        backup_dir = tmp_path / "backups"
+        assert not backup_dir.exists()
+
+        result = backup(source, backup_dir)
+
+        assert backup_dir.is_dir()
+        assert result.exists()
+        assert result.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+
+    def test_creates_nested_backup_dir_when_parent_missing(self, tmp_path):
+        source = tmp_path / "GLOBAL_MEMORY.md"
+        source.write_text("# memory content", encoding="utf-8")
+        result = backup(source, tmp_path / ".claude-memory" / "backups")
+        assert result.exists()
+
 
 class TestListBackups:
     def test_returns_newest_first(self, backup_env):

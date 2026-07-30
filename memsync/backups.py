@@ -16,6 +16,12 @@ def backup(source: Path, backup_dir: Path) -> Path:
     (GLOBAL_MEMORY.md) and cold (MEMORY_ARCHIVE.md) files keep their identity.
     Returns the path of the new backup file.
     """
+    # Only `memsync init` creates backups/, and the store gitignores it, so a
+    # machine that got its store by cloning has no such directory. Every write
+    # path backs up first, so without this the first refresh or harvest on a
+    # cloned store dies with FileNotFoundError before doing any work.
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest = backup_dir / f"{source.stem}_{timestamp}.md"
     shutil.copy2(source, dest)
