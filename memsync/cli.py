@@ -962,8 +962,6 @@ def _harvest_all_locked(
 
 def cmd_harvest(args: argparse.Namespace, config: Config) -> int:
     """Extract memories from a Claude Code session transcript."""
-    import datetime
-
     # Resolve memory root
     memory_root, code = _require_memory_root(config)
     if memory_root is None:
@@ -1001,7 +999,7 @@ def _cmd_harvest_session(
     memory_root: Path,
     global_memory: Path,
 ) -> int:
-    import datetime  # noqa: F401  (kept for parity with the caller's imports)
+    import datetime
 
     # Resolve project dir
     if args.project:
