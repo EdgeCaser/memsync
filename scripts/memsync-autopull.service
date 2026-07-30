@@ -8,3 +8,10 @@ Type=oneshot
 # rewritten underneath itself by the very pull it is running.
 ExecStart=%h/.local/bin/memsync-autopull.sh
 Nice=10
+
+# A host with no persistent journal keeps nothing a user unit prints, which
+# would make a silently stalled rollout invisible: every skip reason this script
+# logs would be discarded. Append to a file instead, as the other scheduled
+# memsync jobs do. Requires systemd 240 or newer.
+StandardOutput=append:%h/memsync-autopull.log
+StandardError=append:%h/memsync-autopull.log
