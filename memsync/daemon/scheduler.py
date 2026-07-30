@@ -114,6 +114,33 @@ def build_scheduler(
     return scheduler
 
 
+def _snapshot_store(config: Config, memory_root: Path, job: str) -> None:
+    """
+    Commit and sync the store after a scheduled write.
+
+    The CLI does this from its dispatcher, which a scheduled job never goes
+    through — so every unattended refresh and harvest wrote memory and left it
+    uncommitted, while manual runs on the same machine committed normally. The
+    machine looks like it stopped harvesting when in fact only the bookkeeping
+    stopped.
+
+    Never raises: a memory write that already succeeded must not be reported as
+    a failed job because git was.
+    """
+    if not config.git_enabled:
+        return
+    from memsync import store
+
+    try:
+        report = store.autosync(memory_root, f"memsync: {job}", remote=config.git_autosync)
+    except Exception:
+        logger.exception("%s: store autosync failed (the memory write succeeded)", job)
+        return
+    for level, text in report:
+        log = logger.warning if level == "error" else logger.info
+        log("%s: store %s", job, text)
+
+
 def job_nightly_refresh(config: Config) -> None:
     """
     Read today's session log and run a refresh if there are notes.
@@ -196,6 +223,11 @@ def job_nightly_refresh(config: Config) -> None:
             },
             journal_dir=str(memory_root / "journal"),
         )
+
+        # Unconditional, not gated on `changed`: a no-op night is still the
+        # right moment to pull whatever the other machines wrote, and to push a
+        # commit an earlier run left behind when the remote was unreachable.
+        _snapshot_store(config, memory_root, "nightly_refresh")
 
     except Exception:
         logger.exception("nightly_refresh: unexpected error")
@@ -389,6 +421,11 @@ def job_nightly_harvest(config: Config) -> None:
             llm_metadata={"changed": changed_any},
             journal_dir=str(memory_root / "journal"),
         )
+
+        # Inside the advisory lock on purpose: the commit describes the state
+        # this run wrote, and releasing first would let another machine's
+        # harvest land between the write and the commit.
+        _snapshot_store(config, memory_root, "nightly_harvest")
 
     except Exception:
         logger.exception("nightly_harvest: unexpected error")

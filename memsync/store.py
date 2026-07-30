@@ -273,3 +273,52 @@ def push(root: Path) -> str:
         return "no remote configured; nothing to push"
     _git(root, "push", st.remote, st.branch or "HEAD")
     return f"pushed to {st.remote}"
+
+
+def autosync(root: Path, message: str, remote: bool = True) -> list[tuple[str, str]]:
+    """
+    Record a store write in git history and reconcile it with the remote.
+
+    Returns ("info" | "error", text) pairs for the caller to surface: the CLI
+    prints them, the daemon logs them. It lives here rather than in either
+    caller because it was in one of them — the CLI dispatcher — and the daemon
+    wrote memory without it. Scheduled harvests were therefore never committed
+    or pushed at all, which looks exactly like a machine that has stopped
+    harvesting, and hid two nights of merged sessions on the machine that ran
+    them.
+
+    Commit, then pull, then push. The order is not cosmetic: this runs directly
+    after a memory write, so the store is dirty every time, and `git pull
+    --rebase` refuses to run over unstaged changes. Pulling first therefore
+    never pulled — each machine only ever pushed, and the divergence surfaced
+    days later as a rejected push nobody was watching for.
+
+    Best-effort by design: the memory write has already happened and succeeded,
+    so a bookkeeping failure is reported, not raised.
+    """
+    report: list[tuple[str, str]] = []
+
+    commit = snapshot(root, message)
+    if commit:
+        report.append(("info", f"committed {commit}"))
+
+    if not remote:
+        return report
+
+    try:
+        pull(root)
+    except StoreError as exc:
+        # A push over a divergence git could not rebase would be rejected
+        # anyway. One clear failure beats two.
+        report.append(("error", f"pull skipped — {exc}"))
+        return report
+
+    # Not gated on `commit`: a push that failed earlier — network down, remote
+    # unreachable — leaves this machine ahead with nothing new to commit, and
+    # gating here stranded that work until some later run happened to write.
+    if status(root).ahead:
+        try:
+            report.append(("info", push(root)))
+        except StoreError as exc:
+            report.append(("error", f"push failed — {exc}"))
+    return report

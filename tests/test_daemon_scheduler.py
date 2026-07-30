@@ -6,6 +6,7 @@ and mocked API. No real APScheduler scheduling occurs in these tests.
 """
 from __future__ import annotations
 
+import subprocess
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -344,6 +345,164 @@ class TestJobNightlyHarvest:
         # A configured runtime budget is handed to the batched harvest as a deadline.
         assert mock_harvest.call_count == 1
         assert mock_harvest.call_args.kwargs.get("deadline") is not None
+
+
+# ---------------------------------------------------------------------------
+# Scheduled writes reaching the store
+# ---------------------------------------------------------------------------
+
+def _git_available() -> bool:
+    try:
+        subprocess.run(["git", "--version"], capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):  # pragma: no cover
+        return False
+    return True
+
+
+needs_git = pytest.mark.skipif(not _git_available(), reason="git not installed")
+
+
+def _run_git(root: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
+    )
+
+
+@pytest.fixture
+def daemon_config_with_store(daemon_config: Config, tmp_path: Path):
+    """A daemon config whose memory root is a git store sharing an origin."""
+    import dataclasses
+
+    from memsync import store
+
+    memory_root = daemon_config.sync_root / ".claude-memory"
+    store.init_repo(memory_root)
+    bare = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(bare)], check=True, capture_output=True, text=True
+    )
+    branch = store.status(memory_root).branch
+    _run_git(memory_root, "remote", "add", "origin", str(bare))
+    _run_git(memory_root, "push", "-u", "origin", branch)
+
+    cfg = dataclasses.replace(daemon_config, git_enabled=True, git_autosync=True)
+    return cfg, memory_root, bare
+
+
+@needs_git
+class TestScheduledWritesReachTheStore:
+    """
+    The CLI commits from its dispatcher, which no scheduled job goes through.
+    Unattended refreshes and harvests therefore wrote memory and left it
+    uncommitted and unpushed — indistinguishable, from any other machine, from
+    a machine that had stopped harvesting.
+    """
+
+    @staticmethod
+    def _harvest_result(new_content: str, ids: list[str]) -> dict:
+        return {
+            "changed": True,
+            "changed_cold": False,
+            "updated_content": new_content,
+            "truncated": False,
+            "malformed": False,
+            "harvested_ids": ids,
+        }
+
+    def test_a_scheduled_harvest_commits_and_pushes(
+        self, daemon_config_with_store, tmp_path: Path
+    ) -> None:
+        import dataclasses
+
+        from memsync import store
+
+        cfg, memory_root, _ = daemon_config_with_store
+        projects = tmp_path / "projects"
+        (projects / "proj").mkdir(parents=True)
+        (projects / "proj" / "session-a.jsonl").write_text(
+            '{"type":"user","message":{"role":"user","content":"a note"}}\n', encoding="utf-8"
+        )
+        cfg = dataclasses.replace(
+            cfg, daemon=dataclasses.replace(cfg.daemon, harvest_projects_dir=str(projects))
+        )
+
+        with patch(
+            "memsync.sync.harvest_sessions_batched",
+            return_value=self._harvest_result("# Global Memory\n\n- harvested\n", ["session-a"]),
+        ):
+            job_nightly_harvest(cfg)
+
+        st = store.status(memory_root)
+        assert (st.dirty, st.ahead, st.behind) == (False, 0, 0)
+        log = subprocess.run(
+            ["git", "-C", str(memory_root), "log", "-1", "--format=%s"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert "nightly_harvest" in log
+
+    def test_a_scheduled_refresh_commits_and_pushes(self, daemon_config_with_store) -> None:
+        from memsync import store
+
+        cfg, memory_root, _ = daemon_config_with_store
+        today = date.today().strftime("%Y-%m-%d")
+        (memory_root / "sessions" / f"{today}.md").write_text("notes", encoding="utf-8")
+
+        result = {
+            "changed": True,
+            "updated_content": "# Global Memory\n\n- refreshed\n",
+            "truncated": False,
+        }
+        with patch("memsync.sync.refresh_memory_content", return_value=result):
+            with patch("memsync.claude_md.sync"):
+                job_nightly_refresh(cfg)
+
+        st = store.status(memory_root)
+        assert (st.dirty, st.ahead, st.behind) == (False, 0, 0)
+
+    def test_a_scheduled_refresh_pulls_on_a_night_it_changed_nothing(
+        self, daemon_config_with_store, tmp_path: Path
+    ) -> None:
+        # A no-op night is still the right moment to collect what the other
+        # machines wrote; gating the sync on "did this run change anything"
+        # would leave the store behind until the next night that did.
+        cfg, memory_root, bare = daemon_config_with_store
+        clone = tmp_path / "other"
+        subprocess.run(
+            ["git", "clone", str(bare), str(clone)], check=True, capture_output=True, text=True
+        )
+        (clone / "from-other.md").write_text("remote work\n", encoding="utf-8")
+        _run_git(clone, "add", "-A")
+        _run_git(
+            clone, "-c", "user.email=other@localhost", "-c", "user.name=other",
+            "commit", "-m", "the other machine wrote this",
+        )
+        _run_git(clone, "push", "origin", "HEAD")
+
+        today = date.today().strftime("%Y-%m-%d")
+        (memory_root / "sessions" / f"{today}.md").write_text("notes", encoding="utf-8")
+        result = {"changed": False, "updated_content": "# Global Memory\n", "truncated": False}
+        with patch("memsync.sync.refresh_memory_content", return_value=result):
+            job_nightly_refresh(cfg)
+
+        assert (memory_root / "from-other.md").exists()
+
+    def test_a_store_that_cannot_sync_does_not_fail_the_job(
+        self, daemon_config_with_store
+    ) -> None:
+        # The memory write has already succeeded by then. Git failing is a
+        # bookkeeping problem, not a reason to report a failed harvest.
+        cfg, memory_root, _ = daemon_config_with_store
+        _run_git(memory_root, "remote", "set-url", "origin", str(memory_root / "nope.git"))
+        today = date.today().strftime("%Y-%m-%d")
+        (memory_root / "sessions" / f"{today}.md").write_text("notes", encoding="utf-8")
+
+        new_content = "# Global Memory\n\n- refreshed\n"
+        result = {"changed": True, "updated_content": new_content, "truncated": False}
+        with patch("memsync.sync.refresh_memory_content", return_value=result):
+            with patch("memsync.claude_md.sync"):
+                job_nightly_refresh(cfg)  # must not raise
+
+        assert (memory_root / "GLOBAL_MEMORY.md").read_text(encoding="utf-8") == new_content
 
 
 # ---------------------------------------------------------------------------

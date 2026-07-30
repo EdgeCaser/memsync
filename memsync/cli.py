@@ -1453,42 +1453,17 @@ def _snapshot_store(config: Config, memory_root: Path, message: str) -> None:
     """
     Record a store write in git history, if the store is a repo and git is on.
 
-    Best-effort by design: the memory write has already happened and succeeded,
-    so a bookkeeping failure is reported, not raised.
-
-    Commit, then pull, then push. The order is not cosmetic: this runs directly
-    after a memory write, so the store is dirty every time, and `git pull
-    --rebase` refuses to run over unstaged changes. Pulling first therefore
-    never pulled — each machine only ever pushed, and the divergence surfaced
-    days later as a rejected push nobody was watching for.
+    The sequence lives in `store.autosync` because the daemon needs the same
+    one; this wrapper only decides where the report goes. Errors go to stderr
+    so a failed sync is still visible when stdout is being captured into a
+    notification.
     """
     if not config.git_enabled:
         return
     from memsync import store
 
-    commit = store.snapshot(memory_root, message)
-    if commit:
-        print(f"  store: committed {commit}")
-
-    if not config.git_autosync:
-        return
-
-    try:
-        store.pull(memory_root)
-    except store.StoreError as exc:
-        # A push over a divergence git could not rebase would be rejected
-        # anyway. One clear failure beats two.
-        print(f"  store: pull skipped — {exc}", file=sys.stderr)
-        return
-
-    # Not gated on `commit`: a push that failed earlier — network down, remote
-    # unreachable — leaves this machine ahead with nothing new to commit, and
-    # gating here stranded that work until some later run happened to write.
-    if store.status(memory_root).ahead:
-        try:
-            print(f"  store: {store.push(memory_root)}")
-        except store.StoreError as exc:
-            print(f"  store: push failed — {exc}", file=sys.stderr)
+    for level, text in store.autosync(memory_root, message, remote=config.git_autosync):
+        print(f"  store: {text}", file=sys.stderr if level == "error" else sys.stdout)
 
 
 def cmd_store(args: argparse.Namespace, config: Config) -> int:
