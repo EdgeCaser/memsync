@@ -475,3 +475,31 @@ def write_projection(projection: Projection, config: Config) -> list[Path]:
     core.write_text(projection.core, encoding="utf-8")
     written.append(core)
     return written
+
+
+def sync_resident(memory_path: Path, config: Config) -> None:
+    """
+    Point CLAUDE.md / AGENTS.md at whatever should be resident context.
+
+    With projection enabled that is the generated core, not GLOBAL_MEMORY.md —
+    the whole point being that per-project detail stops being loaded into every
+    session. The projection is rebuilt here so the core can never go stale
+    relative to the source it was derived from.
+
+    Every write path (CLI, nightly jobs, web UI) goes through this. When the
+    daemon synced the raw file instead, CLAUDE.md filled up with the full
+    memory after each nightly refresh and the drift check, which compares
+    against the core, flagged it.
+    """
+    from memsync.claude_md import sync_targets
+    from memsync.config import instruction_targets
+
+    source = memory_path
+    if config.projection_enabled:
+        projection = build_projection(
+            memory_path.read_text(encoding="utf-8"), config, topics_path(config)
+        )
+        write_projection(projection, config)
+        source = core_path(config)
+
+    sync_targets(source, instruction_targets(config))

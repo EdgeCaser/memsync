@@ -6,7 +6,7 @@
 
 Cross-platform global memory manager for Claude Code, Codex, and similar AI coding agents.
 
-Claude Code has no memory between sessions. memsync fixes that: it maintains one canonical `GLOBAL_MEMORY.md` in your cloud sync folder, then syncs it into each agent's startup instruction file such as `~/.claude/CLAUDE.md` and `~/AGENTS.md`.
+Claude Code has no memory between sessions. memsync fixes that: it maintains one canonical `GLOBAL_MEMORY.md` in your cloud sync folder, then syncs it into each agent's startup instruction file such as `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`.
 
 You can update memory manually with a single command, or install the daemon and let it run in the background — harvesting your session transcripts every night and keeping your memory current without any intervention.
 
@@ -36,7 +36,7 @@ docs/examples/              ← example CLAUDE.md files for different product ty
   CLAUDE.md.api_platform
 ```
 
-Claude Code reads `~/.claude/CLAUDE.md`, and Codex can read `~/AGENTS.md`. memsync keeps those instruction targets current from the same source of truth. See `docs/examples/` for example `CLAUDE.md` files tailored to different product types.
+Claude Code reads `~/.claude/CLAUDE.md`, and Codex reads `~/.codex/AGENTS.md` (or `$CODEX_HOME/AGENTS.md`). memsync keeps those instruction targets current from the same source of truth. Other tools also write to the Codex file, so memsync owns only a block between `<!-- BEGIN memsync` and `<!-- END memsync -->` there and leaves the rest of the file alone. See `docs/examples/` for example `CLAUDE.md` files tailored to different product types.
 
 Memory is updated two ways:
 - **`memsync harvest`** — reads Claude Code's session transcript directly and extracts what's worth remembering. No notes required from you.
@@ -145,7 +145,7 @@ memsync config set sync_root /path/to/custom/folder
 memsync config set keep_days 60
 memsync config set max_memory_lines 300
 memsync config set claude_md_target ~/.claude/CLAUDE.md
-memsync config set codex_agents_target ~/AGENTS.md
+memsync config set codex_agents_target ~/.codex/AGENTS.md
 ```
 
 ### `memsync usage`
@@ -242,7 +242,7 @@ For detailed setup and configuration of these enhancements, please refer to [`CO
 
 Detection is automatic. If multiple providers are found during `memsync init`, you'll be prompted to choose.
 
-**Windows note:** Symlinks require admin rights or Developer Mode on Windows. memsync copies `GLOBAL_MEMORY.md` into instruction targets such as `~/.claude/CLAUDE.md` and `~/AGENTS.md` instead of symlinking when needed.
+**Windows note:** Symlinks require admin rights or Developer Mode on Windows. memsync copies `GLOBAL_MEMORY.md` into instruction targets such as `~/.claude/CLAUDE.md` instead of symlinking when needed.
 
 **iCloud note:** iCloud Drive doesn't sync dot-folders on Mac. memsync stores data in `claude-memory/` (no leading dot) when using the iCloud provider.
 
@@ -267,7 +267,7 @@ api_key = "sk-ant-..."   # stored here, not in environment
 
 [paths]
 claude_md_target = "/Users/ian/.claude/CLAUDE.md"
-codex_agents_target = "/Users/ian/AGENTS.md"
+codex_agents_target = "/Users/ian/.codex/AGENTS.md"
 
 [backups]
 keep_days = 30

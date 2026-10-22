@@ -150,8 +150,7 @@ def job_nightly_refresh(config: Config) -> None:
     from datetime import date
 
     from memsync.backups import backup
-    from memsync.claude_md import sync_many
-    from memsync.config import instruction_targets
+    from memsync.projection import sync_resident
     from memsync.providers import get_provider
     from memsync.sync import load_or_init_archive, refresh_memory_content
 
@@ -198,7 +197,7 @@ def job_nightly_refresh(config: Config) -> None:
                 if result["changed"]:
                     backup(memory_path, memory_root / "backups")
                     memory_path.write_text(result["updated_content"], encoding="utf-8")
-                    sync_many(memory_path, [path for _, path in instruction_targets(config)])
+                    sync_resident(memory_path, config)
                     if result.get("changed_cold") and result.get("updated_cold"):
                         if archive_path.exists():
                             backup(archive_path, memory_root / "backups")
@@ -243,8 +242,6 @@ def job_nightly_harvest(config: Config) -> None:
     Never raises — a crash here would take down the whole scheduler.
     """
     from memsync.backups import backup
-    from memsync.claude_md import sync_many
-    from memsync.config import instruction_targets
     from memsync.harvest import (
         HarvestIndexError,
         list_sessions,
@@ -252,6 +249,7 @@ def job_nightly_harvest(config: Config) -> None:
         read_session_transcript,
         save_harvested_index,
     )
+    from memsync.projection import sync_resident
     from memsync.providers import get_provider
     from memsync.sync import harvest_sessions_batched, load_or_init_archive, load_or_init_memory
 
@@ -398,7 +396,7 @@ def job_nightly_harvest(config: Config) -> None:
         if changed_any:
             backup(memory_path, memory_root / "backups")
             memory_path.write_text(current_memory, encoding="utf-8")
-            sync_many(memory_path, [path for _, path in instruction_targets(config)])
+            sync_resident(memory_path, config)
             if changed_cold_any:
                 if archive_path.exists():
                     backup(archive_path, memory_root / "backups")
@@ -478,7 +476,7 @@ def job_drift_check(config: Config) -> None:
     Fires a notification via the configured channel if out of sync.
     Never raises.
     """
-    from memsync.claude_md import is_synced
+    from memsync.claude_md import target_is_synced
     from memsync.config import instruction_targets
     from memsync.daemon.notify import notify
     from memsync.providers import get_provider
@@ -495,7 +493,7 @@ def job_drift_check(config: Config) -> None:
         if not memory_path.exists():
             return
 
-        # Compare against whatever _sync_instruction_targets actually writes.
+        # Compare against whatever projection.sync_resident actually writes.
         # With projection on that is the generated core, not GLOBAL_MEMORY.md;
         # checking the source instead reports every projection-enabled install
         # as drifted, every interval, which trains the alert to be ignored and
@@ -510,7 +508,7 @@ def job_drift_check(config: Config) -> None:
         stale = [
             (label, path)
             for label, path in instruction_targets(config)
-            if not is_synced(expected_source, path)
+            if not target_is_synced(expected_source, label, path)
         ]
         if stale:
             lines = [

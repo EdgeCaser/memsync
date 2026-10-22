@@ -39,7 +39,7 @@ claude_md_target = "~/.claude/CLAUDE.md"
 
 # Where to write the AGENTS.md file that Codex reads at session start.
 # Change this if your Codex environment uses a different AGENTS.md path.
-codex_agents_target = "~/AGENTS.md"
+codex_agents_target = "~/.codex/AGENTS.md"
 
 # Specifies a project working directory for Claude. When Claude is invoked from
 # an integrated tool (e.g., a Slack bot), it will operate within this directory.
@@ -237,7 +237,7 @@ memsync config set keep_days 60
 ```
 
 Valid keys for `memsync config set`:
-- `codex_agents_target` â€” path to write AGENTS.md (default: `~/AGENTS.md`)
+- `codex_agents_target` â€” path to write AGENTS.md (default: `$CODEX_HOME/AGENTS.md`, else `~/.codex/AGENTS.md`)
 - `provider` — must be a registered provider name
 - `model` — any string (validated on first API call with friendly error)
 - `sync_root` — path, must exist
@@ -263,7 +263,8 @@ Valid keys for `memsync config set`:
   aren't broken if Claude Code ever changes its config location, or if they have a
   non-standard setup. Always expand `~` via `.expanduser()` before use.
 
-- `codex_agents_target` defaults to `~/AGENTS.md` and should point to the
+- `codex_agents_target` defaults to `$CODEX_HOME/AGENTS.md` (else
+  `~/.codex/AGENTS.md`) and should point to the
   `AGENTS.md` file your Codex environment reads at startup. Always expand `~`
   via `.expanduser()` before use.
 

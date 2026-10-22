@@ -99,3 +99,37 @@ class TestWebSave:
         # Both instruction targets should have been written.
         assert config.claude_md_target.exists()
         assert config.codex_agents_target.exists()
+
+    def test_save_with_projection_syncs_the_core(
+        self, web_config: tuple, tmp_path: Path
+    ) -> None:
+        """/save used to copy GLOBAL_MEMORY.md straight into CLAUDE.md, so with
+        projection on a web edit put the full memory back into resident context."""
+        import dataclasses
+
+        from memsync.claude_md import BLOCK_BEGIN, BLOCK_END
+        from memsync.projection import core_path
+
+        config, _ = web_config
+        config = dataclasses.replace(
+            config,
+            projection_enabled=True,
+            projection_root=tmp_path / "local",
+            skill_root=tmp_path / "skills" / "memsync-memory",
+        )
+        new_content = (
+            "# Global Memory\n\n"
+            "## Hard constraints\n- Always test\n\n"
+            "## Widget Factory\n- Sprocket line runs on Tuesdays\n"
+        )
+        app = create_app(config)
+        with app.test_client() as client:
+            client.post("/save", data={"content": new_content})
+
+        core = core_path(config).read_text(encoding="utf-8")
+        assert "Sprocket line" not in core
+        assert config.claude_md_target.read_text(encoding="utf-8") == core
+
+        agents = config.codex_agents_target.read_text(encoding="utf-8")
+        begin = agents.index(BLOCK_BEGIN) + len(BLOCK_BEGIN)
+        assert agents[begin:agents.index(BLOCK_END)].strip() == core.strip()

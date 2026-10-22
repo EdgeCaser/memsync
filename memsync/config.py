@@ -268,7 +268,10 @@ class Config:
         if self.claude_md_target is None:
             self.claude_md_target = Path("~/.claude/CLAUDE.md").expanduser()
         if self.codex_agents_target is None:
-            self.codex_agents_target = Path("~/AGENTS.md").expanduser()
+            # Codex reads its global file from $CODEX_HOME (default ~/.codex).
+            # It never looks in ~ itself unless launched from there.
+            codex_home = os.environ.get("CODEX_HOME") or "~/.codex"
+            self.codex_agents_target = Path(codex_home).expanduser() / "AGENTS.md"
 
     @classmethod
     def load(cls) -> Config:
