@@ -60,7 +60,9 @@ testpaths = ["tests"]
 markers = [
     "smoke: fast read-only checks — run any time, no API calls, no filesystem writes",
 ]
-addopts = "--cov=memsync --cov-fail-under=80 --cov-report=term-missing"
+# No per-file coverage table by default: it is most of every run's output.
+# The 80% gate still applies. For uncovered lines: pytest --cov-report=term-missing
+addopts = "--cov=memsync --cov-fail-under=80 --cov-report="
 
 [tool.coverage.run]
 omit = [

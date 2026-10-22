@@ -48,7 +48,7 @@ jobs:
         run: pip install -e ".[dev,daemon]"
 
       - name: Run tests (with coverage)
-        run: pytest tests/ -v
+        run: pytest tests/ -v --cov-report=term-missing
 
       - name: Smoke test
         run: pytest -m smoke -v --no-cov
