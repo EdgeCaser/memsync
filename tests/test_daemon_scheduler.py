@@ -553,7 +553,7 @@ class TestJobBackupMirror:
 
 class TestJobDriftCheck:
     def test_sends_notification_when_out_of_sync(self, daemon_config: Config) -> None:
-        with patch("memsync.claude_md.is_synced", return_value=False):
+        with patch("memsync.claude_md.target_is_synced", return_value=False):
             with patch("memsync.daemon.notify.notify") as mock_notify:
                 job_drift_check(daemon_config)
                 mock_notify.assert_called_once()
@@ -561,7 +561,7 @@ class TestJobDriftCheck:
                 assert "out of sync" in call_kwargs[1]["subject"].lower()
 
     def test_no_notification_when_in_sync(self, daemon_config: Config) -> None:
-        with patch("memsync.claude_md.is_synced", return_value=True):
+        with patch("memsync.claude_md.target_is_synced", return_value=True):
             with patch("memsync.daemon.notify.notify") as mock_notify:
                 job_drift_check(daemon_config)
                 mock_notify.assert_not_called()
@@ -575,7 +575,7 @@ class TestJobDriftCheck:
             mock_notify.assert_not_called()
 
     def test_does_not_raise_on_exception(self, daemon_config: Config) -> None:
-        with patch("memsync.claude_md.is_synced", side_effect=RuntimeError("boom")):
+        with patch("memsync.claude_md.target_is_synced", side_effect=RuntimeError("boom")):
             job_drift_check(daemon_config)  # must not raise
 
     def test_projection_compares_against_the_core_not_the_source(
@@ -592,12 +592,12 @@ class TestJobDriftCheck:
 
         seen: list = []
 
-        def fake_is_synced(source, target):
+        def fake_is_synced(source, label, target):
             seen.append(source)
             return True
 
         with patch("memsync.projection.core_path", return_value=core):
-            with patch("memsync.claude_md.is_synced", side_effect=fake_is_synced):
+            with patch("memsync.claude_md.target_is_synced", side_effect=fake_is_synced):
                 with patch("memsync.daemon.notify.notify") as mock_notify:
                     job_drift_check(cfg)
 

@@ -166,7 +166,9 @@ OneDrive/.claude-memory/          ← or iCloud/.claude-memory/, etc.
 
 ---
 
-By default, Codex also gets a synced `~/AGENTS.md` copy of `GLOBAL_MEMORY.md`.
+By default, Codex also gets the same content in `~/.codex/AGENTS.md`. That file is
+shared with other tools, so memsync writes only a marked `BEGIN memsync` /
+`END memsync` block there (`claude_md.sync_block`) and never replaces the file.
 
 ## What does NOT belong in this tool
 
@@ -210,7 +212,7 @@ config and passes it to `claude_md.sync()`. This is already reflected in
 the `claude_md.py` module spec above.
 
 The same principle now applies to `codex_agents_target`, which defaults to
-`~/AGENTS.md` but should remain configurable.
+`$CODEX_HOME/AGENTS.md` (else `~/.codex/AGENTS.md`) but should remain configurable.
 
 ### 3. Keep the Anthropic SDK version loose
 

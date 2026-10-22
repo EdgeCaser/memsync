@@ -35,10 +35,15 @@ class TestConfigDefaults:
         assert c.claude_md_target is not None
         assert c.claude_md_target == Path("~/.claude/CLAUDE.md").expanduser()
 
-    def test_default_codex_agents_target_is_set(self):
+    def test_default_codex_agents_target_is_set(self, monkeypatch):
+        monkeypatch.delenv("CODEX_HOME", raising=False)
         c = Config()
-        assert c.codex_agents_target is not None
-        assert c.codex_agents_target == Path("~/AGENTS.md").expanduser()
+        assert c.codex_agents_target == Path("~/.codex/AGENTS.md").expanduser()
+
+    def test_default_codex_agents_target_follows_codex_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+        c = Config()
+        assert c.codex_agents_target == tmp_path / "codex-home" / "AGENTS.md"
 
     def test_default_project_cwd_is_none(self):
         c = Config()

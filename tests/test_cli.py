@@ -589,9 +589,9 @@ class TestCmdDoctor:
         config, tmp_path, global_memory = memory_file
 
         # Sync CLAUDE.md first
-        from memsync.claude_md import sync_many
+        from memsync.claude_md import sync_targets
         config.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
-        sync_many(global_memory, [config.claude_md_target, config.codex_agents_target])
+        sync_targets(global_memory, [("CLAUDE.md", config.claude_md_target), ("AGENTS.md", config.codex_agents_target)])
 
         monkeypatch.setattr("memsync.cli.get_config_path",
                             lambda: tmp_path / "config.toml")
@@ -1592,9 +1592,9 @@ class TestCmdDoctorExtras:
         (tmp_path / "config.toml").write_text("[core]\n", encoding="utf-8")
         monkeypatch.setattr("memsync.cli._PID_FILE", tmp_path / "nonexistent.pid")
 
-        from memsync.claude_md import sync_many
+        from memsync.claude_md import sync_targets
         config_with_key.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
-        sync_many(global_memory, [config_with_key.claude_md_target, config_with_key.codex_agents_target])
+        sync_targets(global_memory, [("CLAUDE.md", config_with_key.claude_md_target), ("AGENTS.md", config_with_key.codex_agents_target)])
 
         result = cmd_doctor(_args(), config_with_key)
         out = capsys.readouterr().out
@@ -1615,9 +1615,9 @@ class TestCmdDoctorExtras:
             llm_backends=["anthropic"],
         )
 
-        from memsync.claude_md import sync_many
+        from memsync.claude_md import sync_targets
         config.claude_md_target.parent.mkdir(parents=True, exist_ok=True)
-        sync_many(global_memory, [config.claude_md_target, config.codex_agents_target])
+        sync_targets(global_memory, [("CLAUDE.md", config.claude_md_target), ("AGENTS.md", config.codex_agents_target)])
 
         cmd_doctor(_args(), config)
         out = capsys.readouterr().out

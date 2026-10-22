@@ -12,7 +12,7 @@ from pathlib import Path
 
 from memsync import __version__
 from memsync.backups import backup, latest_backup, list_backups, prune
-from memsync.claude_md import sync_many as sync_instruction_targets
+from memsync.claude_md import sync_targets as sync_instruction_targets
 from memsync.config import (
     DEFAULT_LLM_BACKENDS,
     Config,
@@ -97,7 +97,7 @@ def _sync_instruction_targets(memory_path: Path, config: Config) -> None:
         write_projection(projection, config)
         source = core_path(config)
 
-    sync_instruction_targets(source, [path for _, path in _instruction_targets(config)])
+    sync_instruction_targets(source, _instruction_targets(config))
 
 
 def _with_store_lock(
@@ -2019,13 +2019,15 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
         # With projection on that is the generated core, not GLOBAL_MEMORY.md —
         # checking the source instead reported every projection-enabled install
         # as broken, and a health check that always fails is not one.
-        from memsync.claude_md import is_synced
+        from memsync.claude_md import target_is_synced
         expected_source = global_memory
         if config.projection_enabled:
             from memsync.projection import core_path
             expected_source = core_path(config)
         for label, target in _instruction_targets(config):
-            synced = expected_source.exists() and is_synced(expected_source, target)
+            synced = expected_source.exists() and target_is_synced(
+                expected_source, label, target
+            )
             detail = f"{target} → {'synced' if synced else 'not synced (run memsync init)'}"
             checks.append((f"{label} synced", synced, detail))
     else:
