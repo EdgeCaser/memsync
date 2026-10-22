@@ -622,6 +622,131 @@ class TestJobDriftCheck:
 
 
 # ---------------------------------------------------------------------------
+# Scheduled writes sync the projected core, not the raw memory
+# ---------------------------------------------------------------------------
+
+_PROJECTED_MEMORY = (
+    "# Global Memory\n\n"
+    "## Hard constraints\n- Always test\n\n"
+    "## Widget Factory\n- Sprocket line runs on Tuesdays\n"
+)
+
+
+@pytest.fixture
+def projected_config(daemon_config: Config, tmp_path: Path) -> Config:
+    import dataclasses
+
+    return dataclasses.replace(
+        daemon_config,
+        projection_enabled=True,
+        projection_root=tmp_path / "local",
+        skill_root=tmp_path / "skills" / "memsync-memory",
+    )
+
+
+def _assert_targets_hold_the_core(config: Config) -> None:
+    from memsync.claude_md import BLOCK_BEGIN, BLOCK_END
+    from memsync.projection import core_path
+
+    core = core_path(config).read_text(encoding="utf-8")
+    assert "Sprocket line" not in core, "project detail leaked into the core"
+    assert "Always test" in core
+
+    assert config.claude_md_target.read_text(encoding="utf-8") == core
+
+    agents = config.codex_agents_target.read_text(encoding="utf-8")
+    begin = agents.index(BLOCK_BEGIN) + len(BLOCK_BEGIN)
+    assert agents[begin:agents.index(BLOCK_END)].strip() == core.strip()
+    assert "Sprocket line" not in agents
+
+
+def _write_today_notes(config: Config) -> Path:
+    memory_root = config.sync_root / ".claude-memory"
+    today = date.today().strftime("%Y-%m-%d")
+    (memory_root / "sessions" / f"{today}.md").write_text(
+        "Worked on the sprocket line.", encoding="utf-8"
+    )
+    return memory_root
+
+
+class TestScheduledWritesSyncTheCore:
+    """The nightly jobs used to sync GLOBAL_MEMORY.md straight into CLAUDE.md,
+    so with projection on every refresh put the full memory back into resident
+    context and the drift check, which compares against the core, flagged it."""
+
+    def test_nightly_refresh_syncs_the_core(self, projected_config: Config) -> None:
+        memory_root = _write_today_notes(projected_config)
+        result = {"changed": True, "updated_content": _PROJECTED_MEMORY, "truncated": False}
+
+        with patch("memsync.sync.refresh_memory_content", return_value=result):
+            job_nightly_refresh(projected_config)
+
+        memory = (memory_root / "GLOBAL_MEMORY.md").read_text(encoding="utf-8")
+        assert memory == _PROJECTED_MEMORY
+        _assert_targets_hold_the_core(projected_config)
+
+    def test_nightly_harvest_syncs_the_core(
+        self, projected_config: Config, tmp_path: Path
+    ) -> None:
+        import dataclasses
+
+        project = tmp_path / "projects" / "proj"
+        project.mkdir(parents=True)
+        (project / "session-1.jsonl").write_text(
+            '{"type":"user","message":{"role":"user","content":"sprockets"}}\n',
+            encoding="utf-8",
+        )
+        cfg = dataclasses.replace(
+            projected_config,
+            daemon=dataclasses.replace(
+                projected_config.daemon, harvest_projects_dir=str(tmp_path / "projects")
+            ),
+        )
+        result = {
+            "changed": True,
+            "changed_cold": False,
+            "updated_content": _PROJECTED_MEMORY,
+            "truncated": False,
+            "malformed": False,
+            "harvested_ids": ["session-1"],
+        }
+
+        with patch("memsync.sync.harvest_sessions_batched", return_value=result):
+            job_nightly_harvest(cfg)
+
+        memory_root = cfg.sync_root / ".claude-memory"
+        memory = (memory_root / "GLOBAL_MEMORY.md").read_text(encoding="utf-8")
+        assert memory == _PROJECTED_MEMORY
+        _assert_targets_hold_the_core(cfg)
+
+    def test_drift_check_is_quiet_after_a_refresh(self, projected_config: Config) -> None:
+        from memsync.projection import sync_resident
+
+        memory_root = _write_today_notes(projected_config)
+        # A machine already set up for projection has a core on disk; without
+        # one the drift check skips and this test could not fail.
+        sync_resident(memory_root / "GLOBAL_MEMORY.md", projected_config)
+        result = {"changed": True, "updated_content": _PROJECTED_MEMORY, "truncated": False}
+
+        with patch("memsync.sync.refresh_memory_content", return_value=result):
+            job_nightly_refresh(projected_config)
+        with patch("memsync.daemon.notify.notify") as mock_notify:
+            job_drift_check(projected_config)
+
+        mock_notify.assert_not_called()
+
+    def test_projection_off_still_syncs_the_raw_memory(self, daemon_config: Config) -> None:
+        _write_today_notes(daemon_config)
+        result = {"changed": True, "updated_content": _PROJECTED_MEMORY, "truncated": False}
+
+        with patch("memsync.sync.refresh_memory_content", return_value=result):
+            job_nightly_refresh(daemon_config)
+
+        claude_md = daemon_config.claude_md_target.read_text(encoding="utf-8")
+        assert claude_md == _PROJECTED_MEMORY
+
+
+# ---------------------------------------------------------------------------
 # job_weekly_digest
 # ---------------------------------------------------------------------------
 

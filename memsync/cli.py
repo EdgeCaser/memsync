@@ -12,7 +12,6 @@ from pathlib import Path
 
 from memsync import __version__
 from memsync.backups import backup, latest_backup, list_backups, prune
-from memsync.claude_md import sync_targets as sync_instruction_targets
 from memsync.config import (
     DEFAULT_LLM_BACKENDS,
     Config,
@@ -75,29 +74,10 @@ def _instruction_targets(config: Config) -> list[tuple[str, Path]]:
 
 
 def _sync_instruction_targets(memory_path: Path, config: Config) -> None:
-    """
-    Point CLAUDE.md / AGENTS.md at whatever should be resident context.
+    """Sync the resident instruction files. See projection.sync_resident."""
+    from memsync.projection import sync_resident
 
-    With projection enabled that is the generated core, not GLOBAL_MEMORY.md —
-    the whole point being that per-project detail stops being loaded into every
-    session. The projection is rebuilt here so the core can never go stale
-    relative to the source it was derived from.
-    """
-    source = memory_path
-    if config.projection_enabled:
-        from memsync.projection import (
-            build_projection,
-            core_path,
-            topics_path,
-            write_projection,
-        )
-        projection = build_projection(
-            memory_path.read_text(encoding="utf-8"), config, topics_path(config)
-        )
-        write_projection(projection, config)
-        source = core_path(config)
-
-    sync_instruction_targets(source, _instruction_targets(config))
+    sync_resident(memory_path, config)
 
 
 def _with_store_lock(
@@ -2015,7 +1995,7 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
         global_memory = memory_root / "GLOBAL_MEMORY.md"
         checks.append(("GLOBAL_MEMORY.md", global_memory.exists(), str(global_memory)))
 
-        # Compare against whatever _sync_instruction_targets actually writes.
+        # Compare against whatever projection.sync_resident actually writes.
         # With projection on that is the generated core, not GLOBAL_MEMORY.md —
         # checking the source instead reported every projection-enabled install
         # as broken, and a health check that always fails is not one.
