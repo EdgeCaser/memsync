@@ -214,3 +214,88 @@ class TestPullPush:
 
     def test_push_without_remote_is_a_noop(self, repo):
         assert "no remote" in store.push(repo)
+
+
+def _g(root, *args):
+    """git with an identity, for commits made outside memsync."""
+    return subprocess.run(
+        ["git", "-C", str(root), "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def two_machines(repo, tmp_path):
+    """
+    This machine's store and a second clone sharing one bare origin.
+
+    The second clone stands in for the other machine: it commits and pushes
+    while this one is idle, the way hand edits on the PC landed before a
+    nightly harvest ran on pi-gateway.
+    """
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    branch = store.status(repo).branch
+    _g(repo, "remote", "add", "origin", str(bare))
+    _g(repo, "push", "-u", "origin", branch)
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(bare), str(other)], check=True, capture_output=True)
+    return repo, other, branch
+
+
+def _other_machine_writes(other, line):
+    path = other / "GLOBAL_MEMORY.md"
+    path.write_text(path.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
+    _g(other, "commit", "-qam", "other machine")
+    _g(other, "push", "-q")
+
+
+@needs_git
+class TestPullBeforeWrite:
+    def test_brings_in_the_other_machines_commit(self, two_machines):
+        repo, other, _ = two_machines
+        _other_machine_writes(other, "- from the Widget Factory laptop")
+
+        store.pull_before_write(repo)
+
+        text = (repo / "GLOBAL_MEMORY.md").read_text(encoding="utf-8")
+        assert "Widget Factory laptop" in text
+        assert store.status(repo).behind == 0
+
+    def test_commits_uncommitted_edits_first_and_keeps_them(self, two_machines):
+        repo, other, _ = two_machines
+        _other_machine_writes(other, "- remote line")
+        (repo / "notes.md").write_text("hand edit\n", encoding="utf-8")
+
+        report = store.pull_before_write(repo)
+
+        assert any("committed uncommitted" in text for _, text in report)
+        assert (repo / "notes.md").read_text(encoding="utf-8") == "hand edit\n"
+        assert "remote line" in (repo / "GLOBAL_MEMORY.md").read_text(encoding="utf-8")
+        assert not store.status(repo).dirty
+
+    def test_unreachable_remote_reports_and_lets_the_write_go_ahead(self, two_machines, tmp_path):
+        repo, _, _ = two_machines
+        _g(repo, "remote", "set-url", "origin", str(tmp_path / "nope.git"))
+
+        report = store.pull_before_write(repo)  # must not raise
+
+        assert report and report[0][0] == "error"
+        assert "could not reach" in report[0][1]
+
+    def test_conflict_raises_and_leaves_the_store_unchanged(self, two_machines):
+        # Last night's case: this machine has an unpushed commit that touches
+        # the same lines as one the other machine pushed.
+        repo, other, _ = two_machines
+        _other_machine_writes(other, "- remote version")
+        mine = repo / "GLOBAL_MEMORY.md"
+        mine.write_text(mine.read_text(encoding="utf-8") + "- local version\n", encoding="utf-8")
+        _g(repo, "commit", "-qam", "local")
+        before = _g(repo, "rev-parse", "HEAD")
+
+        with pytest.raises(store.StoreError):
+            store.pull_before_write(repo)
+
+        assert _g(repo, "rev-parse", "HEAD") == before
+        assert "<<<<<<<" not in mine.read_text(encoding="utf-8")
+        assert not (repo / ".git" / "rebase-merge").exists()

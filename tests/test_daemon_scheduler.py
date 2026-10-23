@@ -505,6 +505,95 @@ class TestScheduledWritesReachTheStore:
         assert (memory_root / "GLOBAL_MEMORY.md").read_text(encoding="utf-8") == new_content
 
 
+def _other_machine_pushes(bare: Path, tmp_path: Path, line: str) -> None:
+    """A second machine commits to the shared store while this one is idle."""
+    other = tmp_path / "other-machine"
+    subprocess.run(["git", "clone", "-q", str(bare), str(other)], check=True, capture_output=True)
+    memory = other / "GLOBAL_MEMORY.md"
+    memory.write_text(memory.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
+    ident = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+    subprocess.run(["git", "-C", str(other), *ident, "commit", "-qam", "other machine"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(other), "push", "-q"], check=True, capture_output=True)
+
+
+@needs_git
+class TestPullBeforeScheduledWrites:
+    """
+    Reconciling after the write is too late: the write itself is computed from
+    a stale base. On 2026-10-23 a nightly harvest on pi-gateway ran on memory
+    missing four commits pushed from the PC, its rebase conflicted, and the
+    push was refused, so the harvest never left the Pi.
+    """
+
+    def test_refresh_reads_what_the_other_machine_pushed(
+        self, daemon_config_with_store, tmp_path
+    ) -> None:
+        cfg, memory_root, bare = daemon_config_with_store
+        _other_machine_pushes(bare, tmp_path, "- Widget Factory ships on Fridays")
+        today = date.today().strftime("%Y-%m-%d")
+        (memory_root / "sessions" / f"{today}.md").write_text("notes", encoding="utf-8")
+
+        seen: list[str] = []
+
+        def fake_refresh(notes, current_memory, llm_config, current_cold):
+            seen.append(current_memory)
+            return {"changed": True, "truncated": False,
+                    "updated_content": current_memory + "- refreshed\n"}
+
+        with patch("memsync.sync.refresh_memory_content", side_effect=fake_refresh):
+            with patch("memsync.claude_md.sync"):
+                job_nightly_refresh(cfg)
+
+        from memsync import store
+
+        assert seen and "Widget Factory ships on Fridays" in seen[0]
+        st = store.status(memory_root)
+        assert (st.ahead, st.behind) == (0, 0), "the refresh should have pushed cleanly"
+
+    def test_refresh_skips_rather_than_write_on_a_diverged_store(
+        self, daemon_config_with_store, tmp_path
+    ) -> None:
+        cfg, memory_root, bare = daemon_config_with_store
+        _other_machine_pushes(bare, tmp_path, "- remote version")
+        memory_path = memory_root / "GLOBAL_MEMORY.md"
+        memory_path.write_text(
+            memory_path.read_text(encoding="utf-8") + "- local version\n", encoding="utf-8"
+        )
+        _run_git(memory_root, "-c", "user.email=t@example.com", "-c", "user.name=t",
+                 "commit", "-qam", "unpushed local change")
+        before = memory_path.read_text(encoding="utf-8")
+        today = date.today().strftime("%Y-%m-%d")
+        (memory_root / "sessions" / f"{today}.md").write_text("notes", encoding="utf-8")
+
+        with patch("memsync.sync.refresh_memory_content") as mock_refresh:
+            job_nightly_refresh(cfg)
+
+        mock_refresh.assert_not_called()
+        assert memory_path.read_text(encoding="utf-8") == before
+
+    def test_cli_store_lock_skips_the_action_on_a_diverged_store(
+        self, daemon_config_with_store, tmp_path
+    ) -> None:
+        from memsync.cli import _with_store_lock
+
+        cfg, memory_root, bare = daemon_config_with_store
+        _other_machine_pushes(bare, tmp_path, "- remote version")
+        memory_path = memory_root / "GLOBAL_MEMORY.md"
+        memory_path.write_text(
+            memory_path.read_text(encoding="utf-8") + "- local version\n", encoding="utf-8"
+        )
+        _run_git(memory_root, "-c", "user.email=t@example.com", "-c", "user.name=t",
+                 "commit", "-qam", "unpushed local change")
+        ran: list[bool] = []
+
+        code = _with_store_lock(cfg, memory_root, lambda: ran.append(True) or 0,
+                                label="harvest", quiet=True)
+
+        assert code == 1
+        assert not ran, "the write must not run on a store that failed to rebase"
+
+
 # ---------------------------------------------------------------------------
 # job_backup_mirror
 # ---------------------------------------------------------------------------

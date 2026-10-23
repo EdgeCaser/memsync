@@ -114,6 +114,27 @@ def _with_store_lock(
     )
     try:
         with store_lock(memory_root, stale):
+            # Pull inside the lock and before the action reads anything, so the
+            # write is computed from what the other machines have already
+            # written. The dispatcher's snapshot afterwards cannot do this: by
+            # then the store is dirty and the write is already on a stale base.
+            if config.git_enabled and config.git_autosync:
+                from memsync import store
+
+                try:
+                    for _level, text in store.pull_before_write(memory_root):
+                        if not quiet:
+                            print(f"  store: {text}")
+                except store.StoreError as exc:
+                    message = (
+                        f"{label} skipped: could not bring the store up to date "
+                        f"before writing ({exc}). Nothing was written."
+                    )
+                    if quiet:
+                        logger.warning(message)
+                    else:
+                        print(message, file=sys.stderr)
+                    return 1
             return action()
     except LockHeld as exc:
         if quiet:
@@ -2010,6 +2031,30 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
             )
             detail = f"{target} → {'synced' if synced else 'not synced (run memsync init)'}"
             checks.append((f"{label} synced", synced, detail))
+
+        # 6. Store in step with its remote. A store that diverged fails every
+        # later sync the same way, and nothing else says so: on 2026-10-23 a
+        # harvest stranded on pi-gateway while every other check here passed.
+        # Uses the last fetched state; doctor stays offline.
+        if config.git_enabled:
+            from memsync import store
+
+            st = store.status(memory_root)
+            if st.is_repo and st.remote:
+                if st.ahead and st.behind:
+                    checks.append((
+                        "Store in sync", False,
+                        f"diverged: {st.ahead} local and {st.behind} remote commit(s) "
+                        f"apart; rebase by hand in {memory_root}",
+                    ))
+                elif st.ahead:
+                    checks.append((
+                        "Store in sync", False,
+                        f"{st.ahead} commit(s) not pushed; run memsync store sync",
+                    ))
+                else:
+                    behind = f", {st.behind} to pull" if st.behind else ""
+                    checks.append(("Store in sync", True, f"nothing unpushed{behind}"))
     else:
         checks.append(("Memory directory", False, "cannot resolve — fix provider first"))
 
