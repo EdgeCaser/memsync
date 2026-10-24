@@ -141,6 +141,31 @@ def _snapshot_store(config: Config, memory_root: Path, job: str) -> None:
         log("%s: store %s", job, text)
 
 
+def _pull_before_write(config: Config, memory_root: Path, job: str) -> bool:
+    """
+    Pull the store before a scheduled job reads it. False means skip the job.
+
+    _snapshot_store reconciles after the write, which is too late to stop the
+    write being computed from a stale base (see store.pull_before_write). A
+    job that cannot pull skips this run rather than write a commit that will
+    not rebase; the next run tries again.
+    """
+    if not (config.git_enabled and config.git_autosync):
+        return True
+    from memsync import store
+
+    try:
+        for _level, text in store.pull_before_write(memory_root):
+            logger.info("%s: store %s", job, text)
+    except Exception as exc:
+        logger.warning(
+            "%s: could not bring the store up to date (%s); skipping this run, "
+            "nothing written", job, exc,
+        )
+        return False
+    return True
+
+
 def job_nightly_refresh(config: Config) -> None:
     """
     Read today's session log and run a refresh if there are notes.
@@ -189,6 +214,8 @@ def job_nightly_refresh(config: Config) -> None:
 
         try:
             with store_lock(memory_root, config.daemon.harvest_lock_stale_seconds):
+                if not _pull_before_write(config, memory_root, "nightly_refresh"):
+                    return
                 current_memory = memory_path.read_text(encoding="utf-8")
                 current_cold = load_or_init_archive(archive_path)
                 llm_config = _daemon_llm_config(config)
@@ -278,6 +305,10 @@ def job_nightly_harvest(config: Config) -> None:
             lock_root = memory_root
         except LockHeld as exc:
             logger.warning("nightly_harvest: %s — skipping this run", exc)
+            return
+
+        # The finally below releases the lock on this early return too.
+        if not _pull_before_write(config, memory_root, "nightly_harvest"):
             return
 
         # Resolve projects roots — configurable so users can point at mounted or

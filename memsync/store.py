@@ -275,6 +275,52 @@ def push(root: Path) -> str:
     return f"pushed to {st.remote}"
 
 
+def pull_before_write(root: Path) -> list[tuple[str, str]]:
+    """
+    Bring the store up to date before a write reads it.
+
+    autosync() reconciles after a write, and has to: the store is dirty by
+    then, so a pull can only come after the commit. But that leaves the write
+    itself computed from whatever this machine last had. When another machine
+    wrote in between, the new commit sits on a stale base, its rebase
+    conflicts, and the push is refused. The work stays on this machine while
+    every later run repeats the same conflict. That is how a nightly harvest
+    on pi-gateway stranded itself on 2026-10-23 after hand edits pushed from
+    the PC the evening before.
+
+    So pull first, while nothing has been written. Changes left uncommitted
+    (a hand edit, an interrupted run) are committed first so the rebase can
+    start and nothing is lost.
+
+    Two failures, two answers. A remote that cannot be reached (a laptop on a
+    plane) is reported and the write goes ahead: nobody else can see the write
+    yet, and autosync pushes it later, so skipping would only lose the run.
+    A fetch that works but a rebase that conflicts raises StoreError, and the
+    caller must not write: the store has already diverged, and another commit
+    on top only deepens it.
+    """
+    report: list[tuple[str, str]] = []
+    if not is_repo(root):
+        return report
+    st = status(root)
+    if not st.remote:
+        return report
+    try:
+        _git(root, "fetch", "--quiet", st.remote)
+    except StoreError as exc:
+        report.append((
+            "error", f"could not reach {st.remote}; writing on the last-known state ({exc})",
+        ))
+        return report
+    if st.dirty:
+        commit = snapshot(root, "memsync: commit uncommitted changes before sync")
+        if commit:
+            report.append(("info", f"committed uncommitted changes as {commit}"))
+    pull(root)
+    report.append(("info", f"pulled from {st.remote} before writing"))
+    return report
+
+
 def autosync(root: Path, message: str, remote: bool = True) -> list[tuple[str, str]]:
     """
     Record a store write in git history and reconcile it with the remote.
