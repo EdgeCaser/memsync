@@ -2,7 +2,7 @@
 
 Status: implemented on `feat/codex-harvest`. Written 2026-10-26.
 
-memsync harvests Claude Code transcripts only. Codex is wired in on the other side: it can be a model backend, and memsync writes its block into `~/.codex/AGENTS.md`. This scope adds Codex as a transcript source. Skulld has nothing to port. Its Codex support is a push-based capture tool over MCP and never reads rollout files.
+memsync harvests Claude Code transcripts only. Codex is wired in on the other side: it can be a model backend, and memsync writes its block into `~/.codex/AGENTS.md`. This scope adds Codex as a transcript source.
 
 ## What's on disk
 
@@ -104,7 +104,7 @@ Integration:
 - nightly harvest picks up Codex rollouts through the shared discovery function
 - config round-trip for both new keys, string and list forms
 
-Per the skulld lesson, write the guardian filter test so it fails when the filter is removed, then put the filter back.
+Write the guardian filter test so it fails when the filter is removed, then put the filter back.
 
 ## Size
 
