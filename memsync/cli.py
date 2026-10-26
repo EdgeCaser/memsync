@@ -23,9 +23,9 @@ from memsync.config import (
 )
 from memsync.harvest import (
     HarvestIndexError,
+    discover_sessions,
     find_latest_session,
     find_project_dir,
-    list_sessions,
     load_harvested_index,
     read_session_transcript,
     save_harvested_index,
@@ -649,26 +649,32 @@ def _harvest_all_locked(
     memory_root: Path,
     global_memory: Path,
 ) -> int:
-    """Sweep all projects under ~/.claude/projects/ and harvest unprocessed sessions."""
+    """Sweep Claude Code projects (and Codex rollouts, if enabled) and harvest
+    unprocessed sessions."""
     import time
 
     started_at = time.monotonic()
     daemon = getattr(config, "daemon", None)
     roots = daemon.projects_roots() if daemon else [Path("~/.claude/projects").expanduser()]
+    codex_roots = (
+        daemon.codex_sessions_roots() if daemon and daemon.harvest_codex else []
+    )
 
-    present = [root for root in roots if root.exists()]
-    missing = [root for root in roots if not root.exists()]
-    if not present:
+    if not any(root.exists() for root in roots + codex_roots):
         if not args.auto:
-            where = ", ".join(str(root) for root in roots)
-            print(f"No Claude Code projects directory found at {where}")
+            where = ", ".join(str(root) for root in roots + codex_roots)
+            print(f"No session directories found at {where}")
         return 0
     # A root that has gone away is reported, not fatal: these point at synced
     # copies of other machines' transcripts, and a peer that is offline or a
     # sync folder that has not appeared yet must not stop the harvest of the
     # roots that are present.
-    for root in missing:
-        print(f"  Skipping missing projects root {root}", file=sys.stderr)
+    for root in roots:
+        if not root.exists():
+            print(f"  Skipping missing projects root {root}", file=sys.stderr)
+    for root in codex_roots:
+        if not root.exists():
+            print(f"  Skipping missing Codex sessions root {root}", file=sys.stderr)
 
     try:
         harvested = load_harvested_index(memory_root)
@@ -680,26 +686,7 @@ def _harvest_all_locked(
             file=sys.stderr,
         )
         return 1
-    new_sessions: list[Path] = []
-    # Session stems are UUIDs, but the same session can appear under two roots
-    # when a machine both writes locally and syncs a copy. Harvest it once.
-    seen_stems: set[str] = set()
-    for root in present:
-        for project_dir in sorted(root.iterdir()):
-            if not project_dir.is_dir():
-                continue
-            for session_path in list_sessions(project_dir):
-                if session_path.stem in seen_stems:
-                    continue
-                seen_stems.add(session_path.stem)
-                stored = harvested.get(session_path.stem)
-                if stored is None:
-                    new_sessions.append(session_path)
-                elif stored >= 0:
-                    # Re-harvest if the session has grown since last harvest
-                    _, current_count = read_session_transcript(session_path)
-                    if current_count > stored:
-                        new_sessions.append(session_path)
+    new_sessions = discover_sessions(roots, codex_roots, harvested, include_grown=True)
 
     if not new_sessions:
         if not args.auto:

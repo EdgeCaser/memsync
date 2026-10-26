@@ -271,7 +271,7 @@ def job_nightly_harvest(config: Config) -> None:
     from memsync.backups import backup
     from memsync.harvest import (
         HarvestIndexError,
-        list_sessions,
+        discover_sessions,
         load_harvested_index,
         read_session_transcript,
         save_harvested_index,
@@ -315,16 +315,21 @@ def job_nightly_harvest(config: Config) -> None:
         # synced paths, and plural because the machine awake at harvest time is
         # often not the one that produced the transcripts.
         roots = config.daemon.projects_roots()
-        present = [root for root in roots if root.exists()]
-        if not present:
+        codex_roots = (
+            config.daemon.codex_sessions_roots() if config.daemon.harvest_codex else []
+        )
+        if not any(root.exists() for root in roots + codex_roots):
             logger.debug(
-                "nightly_harvest: no projects dir found at %s, skipping",
-                ", ".join(str(root) for root in roots),
+                "nightly_harvest: no session dirs found at %s, skipping",
+                ", ".join(str(root) for root in roots + codex_roots),
             )
             return
         for root in roots:
             if not root.exists():
                 logger.info("nightly_harvest: skipping missing projects root %s", root)
+        for root in codex_roots:
+            if not root.exists():
+                logger.info("nightly_harvest: skipping missing Codex sessions root %s", root)
 
         # Collect all unharvested sessions across all project subdirectories
         try:
@@ -334,17 +339,9 @@ def job_nightly_harvest(config: Config) -> None:
             # run picks up automatically once the index is repaired.
             logger.exception("nightly_harvest: harvest index unreadable, skipping run")
             return
-        new_sessions: list[Path] = []
-        seen_stems: set[str] = set()
-        for root in present:
-            for project_dir in sorted(root.iterdir()):
-                if project_dir.is_dir():
-                    for session_path in list_sessions(project_dir):
-                        if session_path.stem in seen_stems:
-                            continue
-                        seen_stems.add(session_path.stem)
-                        if session_path.stem not in harvested:
-                            new_sessions.append(session_path)
+        # include_grown=False keeps the nightly job's existing behavior: unlike
+        # `memsync harvest --all`, it does not re-queue sessions that grew.
+        new_sessions = discover_sessions(roots, codex_roots, harvested, include_grown=False)
 
         if not new_sessions:
             logger.debug("nightly_harvest: no new sessions to process")

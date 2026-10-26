@@ -204,6 +204,22 @@ Behaviour worth knowing:
 - A single path still serializes back as a string, so configs written before
   the setting accepted a list round-trip unchanged.
 
+### Codex rollouts
+
+Codex Desktop rollouts are an opt-in second source. Both keys live in `[daemon]`:
+
+```toml
+[daemon]
+harvest_codex = true                               # default false
+harvest_codex_sessions_dir = "~/.codex/sessions"   # str or list, like harvest_projects_dir
+```
+
+An empty `harvest_codex_sessions_dir` means `$CODEX_HOME/sessions`, falling back
+to `~/.codex/sessions` (`CODEX_HOME` is read at call time). Resolve it with
+`config.daemon.codex_sessions_roots()`, which dedupes and preserves order like
+`projects_roots()`. These keys are edited in `config.toml`; `memsync config set`
+does not handle `[daemon]` keys.
+
 ## Important: SMTP password handling
 
 Storing SMTP passwords in a plaintext config file is not ideal.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import platform
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,10 +15,15 @@ from memsync.harvest import (
     HarvestIndexError,
     chunk_transcript,
     cwd_to_project_key,
+    default_codex_sessions_dir,
+    discover_sessions,
     find_latest_session,
     find_project_dir,
+    is_codex_rollout,
+    list_codex_sessions,
     list_sessions,
     load_harvested_index,
+    read_codex_transcript,
     read_session_transcript,
     save_harvested_index,
 )
@@ -961,3 +967,283 @@ class TestBatchedHarvest:
                 )
 
         assert result["harvested_ids"] == ["s1"]
+
+
+# ---------------------------------------------------------------------------
+# Codex rollouts (all fixtures synthetic: a made-up "Widget Factory" thread)
+# ---------------------------------------------------------------------------
+
+_INTERACTIVE_META = {"id": "t-1", "source": "vscode", "originator": "Codex Desktop"}
+_GUARDIAN_META = {"id": "t-g", "source": {"subagent": {"other": "guardian"}}}
+_SPAWN_META = {"id": "t-s", "source": {"subagent": {"thread_spawn": {"parent": "t-1"}}}}
+_EXEC_META = {"id": "t-e", "source": "exec", "originator": "codex_exec"}
+
+
+def _write_rollout(path: Path, meta: dict, items: list[dict]) -> Path:
+    """Write a session_meta line followed by one line per item."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"timestamp": "2026-01-01T00:00:00Z", "type": "session_meta",
+              "payload": meta, "ordinal": 0}]
+    for n, item in enumerate(items, start=1):
+        lines.append({"timestamp": "2026-01-01T00:00:00Z", "type": item["type"],
+                      "payload": item["payload"], "ordinal": n})
+    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _msg(role: str, *parts, phase: str | None = None) -> dict:
+    payload: dict = {"type": "message", "role": role, "content": list(parts)}
+    if phase:
+        payload["phase"] = phase
+    return {"type": "response_item", "payload": payload}
+
+
+def _user(text: str) -> dict:
+    return _msg("user", {"type": "input_text", "text": text})
+
+
+def _assistant(text: str, phase: str = "final_answer") -> dict:
+    return _msg("assistant", {"type": "output_text", "text": text}, phase=phase)
+
+
+def _rollout_name(stamp: str) -> str:
+    return f"rollout-2026-01-01T{stamp}-0000-0000-0000-000000000000.jsonl"
+
+
+class TestIsCodexRollout:
+    def test_matches_rollout_jsonl(self):
+        assert is_codex_rollout(Path("sessions/2026/01/01/rollout-abc.jsonl"))
+
+    def test_rejects_claude_session_and_zst(self):
+        assert not is_codex_rollout(Path("0b1c2d3e-uuid.jsonl"))
+        assert not is_codex_rollout(Path("rollout-abc.jsonl.zst"))
+
+
+class TestListCodexSessions:
+    def test_finds_nested_rollouts_newest_first(self, tmp_path):
+        old = _write_rollout(tmp_path / "2026/01/01" / _rollout_name("10"), _INTERACTIVE_META, [])
+        new = _write_rollout(tmp_path / "2026/02/03" / _rollout_name("11"), _INTERACTIVE_META, [])
+        os.utime(old, (1_000, 1_000))
+        os.utime(new, (2_000, 2_000))
+        assert list_codex_sessions(tmp_path) == [new, old]
+
+    def test_missing_root_returns_empty(self, tmp_path):
+        assert list_codex_sessions(tmp_path / "nope") == []
+
+    def test_skips_guardian_spawn_and_exec(self, tmp_path):
+        keep = _write_rollout(tmp_path / _rollout_name("01"), _INTERACTIVE_META, [])
+        _write_rollout(tmp_path / _rollout_name("02"), _GUARDIAN_META, [])
+        _write_rollout(tmp_path / _rollout_name("03"), _SPAWN_META, [])
+        _write_rollout(tmp_path / _rollout_name("04"), _EXEC_META, [])
+        assert list_codex_sessions(tmp_path) == [keep]
+
+    def test_skips_missing_empty_and_malformed_first_line(self, tmp_path):
+        keep = _write_rollout(tmp_path / _rollout_name("01"), _INTERACTIVE_META, [])
+        (tmp_path / _rollout_name("02")).write_text("", encoding="utf-8")
+        (tmp_path / _rollout_name("03")).write_text("{not json\n", encoding="utf-8")
+        (tmp_path / _rollout_name("04")).write_text(
+            json.dumps({"type": "response_item", "payload": {}}) + "\n", encoding="utf-8"
+        )
+        (tmp_path / _rollout_name("05")).write_text("[1, 2]\n", encoding="utf-8")
+        assert list_codex_sessions(tmp_path) == [keep]
+
+    def test_ignores_archived_sessions_and_zst(self, tmp_path):
+        sessions = tmp_path / "sessions"
+        keep = _write_rollout(sessions / _rollout_name("01"), _INTERACTIVE_META, [])
+        _write_rollout(sessions / "archived_sessions" / _rollout_name("02"), _INTERACTIVE_META, [])
+        (sessions / (_rollout_name("03") + ".zst")).write_bytes(b"\x28\xb5\x2f\xfd")
+        assert list_codex_sessions(sessions) == [keep]
+
+    def test_default_dir_honors_codex_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "ch"))
+        assert default_codex_sessions_dir() == tmp_path / "ch" / "sessions"
+
+    def test_default_dir_falls_back_to_home(self, monkeypatch):
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        assert default_codex_sessions_dir() == Path("~/.codex").expanduser() / "sessions"
+
+
+class TestReadCodexTranscript:
+    def _read(self, tmp_path, items):
+        path = _write_rollout(tmp_path / _rollout_name("01"), _INTERACTIVE_META, items)
+        return read_codex_transcript(path)
+
+    def test_keeps_user_text_and_both_assistant_phases(self, tmp_path):
+        text, count = self._read(tmp_path, [
+            _user("Why is the Widget Factory line 2 slow?"),
+            _assistant("Checking the conveyor logs.", phase="commentary"),
+            _assistant("Line 2 stalls on the paint step.", phase="final_answer"),
+        ])
+        assert count == 3
+        turns = text.split(SEPARATOR)
+        assert turns[0] == "[USER]\nWhy is the Widget Factory line 2 slow?"
+        assert turns[1] == "[ASSISTANT]\nChecking the conveyor logs."
+        assert turns[2] == "[ASSISTANT]\nLine 2 stalls on the paint step."
+
+    def test_drops_non_message_noise(self, tmp_path):
+        text, count = self._read(tmp_path, [
+            _msg("developer", {"type": "input_text", "text": "permissions scaffolding"}),
+            {"type": "response_item", "payload": {"type": "reasoning", "summary": []}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "shell"}},
+            {"type": "response_item", "payload": {"type": "function_call_output", "output": "x"}},
+            {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "patch"}},
+            {"type": "response_item", "payload": {"type": "agent_message", "text": "hi"}},
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            {"type": "compacted", "payload": {"message": "summary"}},
+            {"type": "turn_context", "payload": {}},
+            _user("Real question about the Widget Factory."),
+        ])
+        assert count == 1
+        assert text == "[USER]\nReal question about the Widget Factory."
+
+    def test_whole_tag_user_parts_dropped(self, tmp_path):
+        text, count = self._read(tmp_path, [
+            _user("<environment_context>\n<cwd>/widgets</cwd>\n</environment_context>"),
+            _user("<external_codex_apps_open_page>page</external_codex_apps_open_page>"),
+            _user("Ship the widget."),
+        ])
+        assert count == 1
+        assert "environment_context" not in text
+        assert "Ship the widget." in text
+
+    def test_question_reply_is_unwrapped(self, tmp_path):
+        text, count = self._read(tmp_path, [
+            _user("<send_user_message_question_reply>\n  Use the blue widget.\n"
+                  "</send_user_message_question_reply>"),
+        ])
+        assert count == 1
+        assert text == "[USER]\nUse the blue widget."
+
+    def test_empty_question_reply_emits_no_turn(self, tmp_path):
+        _, count = self._read(tmp_path, [
+            _user("<send_user_message_question_reply>  </send_user_message_question_reply>"),
+        ])
+        assert count == 0
+
+    @pytest.mark.parametrize("header", [
+        "# AGENTS.md instructions for /widgets\n\nbe nice",
+        "# Files mentioned by the user\n\nwidget.py",
+        "## Referenced files\n\nwidget.py body",
+        "# ROLE\nYou are a widget inspector.",
+    ])
+    def test_injected_header_parts_dropped(self, tmp_path, header):
+        text, count = self._read(tmp_path, [_user(header), _user("Actual ask.")])
+        assert count == 1
+        assert text == "[USER]\nActual ask."
+
+    def test_mid_sentence_tag_mention_kept(self, tmp_path):
+        text, count = self._read(tmp_path, [
+            _user("Why does the <environment_context> block show up twice?"),
+        ])
+        assert count == 1
+        assert "<environment_context>" in text
+
+    def test_all_injected_message_produces_no_turn(self, tmp_path):
+        _, count = self._read(tmp_path, [
+            _msg("user",
+                 {"type": "input_text", "text": "# AGENTS.md instructions"},
+                 {"type": "input_text", "text": "<environment_context>x</environment_context>"},
+                 {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}),
+        ])
+        assert count == 0
+
+    def test_multi_part_message_joined_with_newline(self, tmp_path):
+        text, count = self._read(tmp_path, [
+            _msg("user",
+                 {"type": "input_text", "text": "First part."},
+                 {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+                 "not a dict",
+                 {"type": "input_text", "text": "Second part."}),
+        ])
+        assert count == 1
+        assert text == "[USER]\nFirst part.\nSecond part."
+
+    def test_malformed_and_blank_lines_skipped(self, tmp_path):
+        path = _write_rollout(tmp_path / _rollout_name("01"), _INTERACTIVE_META,
+                              [_user("Before.")])
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n{broken json\n")
+            f.write(json.dumps({"type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "After."}]}}) + "\n")
+        text, count = read_codex_transcript(path)
+        assert count == 2
+        assert "Before." in text and "After." in text
+
+    def test_count_grows_when_thread_resumes(self, tmp_path):
+        path = _write_rollout(tmp_path / _rollout_name("01"), _INTERACTIVE_META,
+                              [_user("One."), _assistant("Two.")])
+        assert read_codex_transcript(path)[1] == 2
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"timestamp": "t", "type": "response_item", "ordinal": 9,
+                                "payload": _user("Three.")["payload"]}) + "\n")
+        assert read_codex_transcript(path)[1] == 3
+
+
+class TestReadSessionTranscriptDispatch:
+    def test_rollout_routes_to_codex_parser(self, tmp_path):
+        path = _write_rollout(tmp_path / _rollout_name("01"), _INTERACTIVE_META,
+                              [_user("<environment_context>x</environment_context>"),
+                               _assistant("Widget answer.")])
+        text, count = read_session_transcript(path)
+        assert (text, count) == ("[ASSISTANT]\nWidget answer.", 1)
+
+    def test_non_rollout_routes_to_claude_parser(self, tmp_path):
+        path = tmp_path / "abc.jsonl"
+        path.write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "hello"}}) + "\n",
+            encoding="utf-8",
+        )
+        assert read_session_transcript(path) == ("[USER]\nhello", 1)
+
+
+class TestDiscoverSessions:
+    @staticmethod
+    def _claude(root: Path, project: str, stem: str) -> Path:
+        path = root / project / f"{stem}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_claude_first_then_codex(self, tmp_path):
+        claude = self._claude(tmp_path / "projects", "proj", "uuid-a")
+        codex = _write_rollout(tmp_path / "codex" / "2026/01/01" / _rollout_name("01"),
+                               _INTERACTIVE_META, [_user("Widget question.")])
+        found = discover_sessions([tmp_path / "projects"], [tmp_path / "codex"], {},
+                                  include_grown=False)
+        assert found == [claude, codex]
+
+    def test_codex_subagents_are_not_discovered(self, tmp_path):
+        _write_rollout(tmp_path / "codex" / _rollout_name("01"), _GUARDIAN_META, [])
+        assert discover_sessions([], [tmp_path / "codex"], {}, include_grown=False) == []
+
+    def test_missing_roots_are_skipped(self, tmp_path):
+        assert discover_sessions([tmp_path / "nope"], [tmp_path / "nada"], {},
+                                 include_grown=True) == []
+
+    def test_harvested_stems_are_skipped(self, tmp_path):
+        rollout = _write_rollout(tmp_path / "codex" / _rollout_name("01"),
+                                 _INTERACTIVE_META, [_user("Widget question.")])
+        harvested = {rollout.stem: 1}
+        assert discover_sessions([], [tmp_path / "codex"], harvested,
+                                 include_grown=False) == []
+
+    def test_grown_rollout_is_requeued_only_when_asked(self, tmp_path):
+        # Codex appends to the same rollout when a thread resumes.
+        rollout = _write_rollout(tmp_path / "codex" / _rollout_name("01"), _INTERACTIVE_META,
+                                 [_user("Widget question."), _assistant("Widget answer.")])
+        harvested = {rollout.stem: 1}
+        assert discover_sessions([], [tmp_path / "codex"], harvested,
+                                 include_grown=True) == [rollout]
+        assert discover_sessions([], [tmp_path / "codex"], harvested,
+                                 include_grown=False) == []
+
+    def test_same_stem_under_two_roots_is_returned_once(self, tmp_path):
+        first = _write_rollout(tmp_path / "a" / _rollout_name("01"), _INTERACTIVE_META, [])
+        _write_rollout(tmp_path / "b" / _rollout_name("01"), _INTERACTIVE_META, [])
+        found = discover_sessions([], [tmp_path / "a", tmp_path / "b"], {},
+                                  include_grown=False)
+        assert found == [first]

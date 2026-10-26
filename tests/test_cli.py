@@ -1375,6 +1375,89 @@ class TestHarvestAcrossMultipleRoots:
         out = capsys.readouterr().out
         assert "nope-one" in out and "nope-two" in out
 
+
+class TestHarvestCodexRollouts:
+    """`harvest --all` picks up Codex rollouts only when harvest_codex is on."""
+
+    @staticmethod
+    def _rollout(root, stem, source="vscode"):
+        path = root / "2026" / "01" / "01" / f"rollout-2026-01-01T00-00-00-{stem}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        meta = {"type": "session_meta", "payload": {"source": source}}
+        msg = {"type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "Widget question."}]}}
+        path.write_text(json.dumps(meta) + "\n" + json.dumps(msg) + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _config(config, projects, codex, enabled=True):
+        return dataclasses.replace(
+            config,
+            daemon=dataclasses.replace(
+                config.daemon,
+                harvest_projects_dir=str(projects),
+                harvest_codex=enabled,
+                harvest_codex_sessions_dir=str(codex),
+            ),
+        )
+
+    def _run(self, config, memory_root, global_memory, seen):
+        def _record(sessions, *a, **kw):  # noqa: ARG001
+            seen.extend(sid for sid, _ in sessions)
+            return _mock_batched_result(
+                changed=False, harvested_ids=[sid for sid, _ in sessions]
+            )
+
+        with patch("memsync.cli.harvest_sessions_batched", side_effect=_record):
+            with patch("time.sleep"):
+                return _harvest_all(
+                    _harvest_args(auto=True), config, memory_root, global_memory,
+                )
+
+    def test_codex_only_root_is_harvested(self, memory_file):
+        # No Claude projects dir at all must not short-circuit the run.
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        rollout = self._rollout(tmp_path / "codex", "widget")
+
+        seen: list[str] = []
+        cfg = self._config(config, tmp_path / "no-claude-here", tmp_path / "codex")
+        assert self._run(cfg, memory_root, global_memory, seen) == 0
+        assert seen == [rollout.stem]
+
+    def test_disabled_means_codex_root_is_never_read(self, memory_file):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        self._rollout(tmp_path / "codex", "widget")
+
+        seen: list[str] = []
+        cfg = self._config(config, tmp_path / "no-claude-here", tmp_path / "codex",
+                           enabled=False)
+        with patch("memsync.harvest.list_codex_sessions") as listing:
+            assert self._run(cfg, memory_root, global_memory, seen) == 0
+        listing.assert_not_called()
+        assert seen == []
+
+    def test_claude_and_codex_share_one_batch_and_one_index(self, memory_file):
+        config, tmp_path, global_memory = memory_file
+        memory_root = config.sync_root / ".claude-memory"
+        claude = tmp_path / "projects" / "proj" / "uuid-widget.jsonl"
+        claude.parent.mkdir(parents=True)
+        claude.write_text('{"type":"user","message":{"content":"hi"}}', encoding="utf-8")
+        rollout = self._rollout(tmp_path / "codex", "widget")
+        self._rollout(tmp_path / "codex", "guardian", source={"subagent": "guardian"})
+
+        seen: list[str] = []
+        cfg = self._config(config, tmp_path / "projects", tmp_path / "codex")
+        assert self._run(cfg, memory_root, global_memory, seen) == 0
+        assert seen == ["uuid-widget", rollout.stem]
+        from memsync.harvest import load_harvested_index
+
+        index = load_harvested_index(memory_root)
+        assert {"uuid-widget", rollout.stem} <= set(index)
+
+
 class TestScheduledHarvestConfig:
     def test_keeps_ollama_when_allowed(self):
         config = Config()

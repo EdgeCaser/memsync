@@ -273,6 +273,49 @@ class TestJobNightlyHarvest:
             encoding="utf-8",
         )
 
+    def test_picks_up_codex_rollouts_when_enabled(
+        self, daemon_config: Config, tmp_path: Path
+    ) -> None:
+        import dataclasses
+        import json
+
+        codex = tmp_path / "codex" / "2026" / "01" / "01"
+        codex.mkdir(parents=True)
+        rollout = codex / "rollout-2026-01-01T00-00-00-widget.jsonl"
+        rollout.write_text(
+            json.dumps({"type": "session_meta", "payload": {"source": "vscode"}}) + "\n"
+            + json.dumps({"type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "Widget question."}]}}) + "\n",
+            encoding="utf-8",
+        )
+
+        cfg = dataclasses.replace(
+            daemon_config,
+            daemon=dataclasses.replace(
+                daemon_config.daemon,
+                harvest_projects_dir=str(tmp_path / "no-claude-here"),
+                harvest_codex=True,
+                harvest_codex_sessions_dir=str(tmp_path / "codex"),
+            ),
+        )
+        mock_result = {
+            "changed": False,
+            "changed_cold": False,
+            "updated_content": "# Global Memory\n",
+            "truncated": False,
+            "malformed": False,
+            "harvested_ids": [],
+        }
+
+        with patch(
+            "memsync.sync.harvest_sessions_batched", return_value=mock_result
+        ) as mock_harvest:
+            job_nightly_harvest(cfg)
+
+        assert mock_harvest.call_count == 1
+        assert mock_harvest.call_args[0][0] == [(rollout.stem, "[USER]\nWidget question.")]
+
     def test_limits_sessions_per_run(self, daemon_config: Config, tmp_path: Path) -> None:
         import dataclasses
 

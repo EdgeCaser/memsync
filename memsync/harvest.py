@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import platform
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 CLAUDE_PROJECTS_DIR = Path("~/.claude/projects").expanduser()
+
+
+def default_codex_sessions_dir() -> Path:
+    """$CODEX_HOME/sessions, falling back to ~/.codex/sessions. Resolved per call."""
+    return Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "sessions"
+
 
 # Separator used between turns in the in-memory transcript string.
 # Uses a Unicode Private Use Area character so it cannot appear naturally in
@@ -73,13 +81,176 @@ def find_latest_session(
     return None
 
 
+def is_codex_rollout(path: Path) -> bool:
+    """True for Codex rollout files (rollout-<timestamp>-<uuid>.jsonl)."""
+    return path.name.startswith("rollout-") and path.suffix == ".jsonl"
+
+
+def _is_interactive_codex_rollout(path: Path) -> bool:
+    """
+    Decide from line 1 alone whether a rollout is a human conversation.
+
+    Guardian and thread_spawn subagents carry a dict `source`; `codex exec`
+    runs carry originator "codex_exec". Neither holds the user's own turns.
+    Anything unreadable is skipped, never raised.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            first = f.readline().strip()
+        meta = json.loads(first)
+    except (OSError, ValueError):
+        logger.debug("Skipping rollout with unreadable first line: %s", path)
+        return False
+    if not isinstance(meta, dict) or meta.get("type") != "session_meta":
+        logger.debug("Skipping rollout without session_meta first line: %s", path)
+        return False
+    payload = meta.get("payload")
+    if not isinstance(payload, dict):
+        logger.debug("Skipping rollout with no session_meta payload: %s", path)
+        return False
+    if not isinstance(payload.get("source"), str):
+        return False
+    return payload.get("originator") != "codex_exec"
+
+
+def list_codex_sessions(sessions_root: Path) -> list[Path]:
+    """Interactive Codex rollouts under sessions_root, newest first."""
+    if not sessions_root.is_dir():
+        return []
+    files = [
+        p for p in sessions_root.rglob("rollout-*.jsonl")
+        if "archived_sessions" not in p.relative_to(sessions_root).parts
+        and _is_interactive_codex_rollout(p)
+    ]
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def discover_sessions(
+    claude_roots: list[Path],
+    codex_roots: list[Path],
+    harvested: dict[str, int],
+    *,
+    include_grown: bool,
+) -> list[Path]:
+    """
+    Every session under the given roots that still needs harvesting.
+
+    Claude sessions come first (root order, project dirs sorted, newest first
+    within a project), then Codex rollouts. Missing roots are skipped; callers
+    report them. A stem seen under two roots is returned once, since a machine
+    can both write a transcript locally and receive a synced copy of it.
+
+    include_grown re-queues a harvested session whose message count has grown
+    since, at the price of re-reading every harvested transcript.
+    """
+    candidates: list[Path] = []
+    for root in claude_roots:
+        if not root.is_dir():
+            continue
+        for project_dir in sorted(root.iterdir()):
+            if project_dir.is_dir():
+                candidates.extend(list_sessions(project_dir))
+    for root in codex_roots:
+        candidates.extend(list_codex_sessions(root))
+
+    new_sessions: list[Path] = []
+    seen_stems: set[str] = set()
+    for session_path in candidates:
+        if session_path.stem in seen_stems:
+            continue
+        seen_stems.add(session_path.stem)
+        stored = harvested.get(session_path.stem)
+        if stored is None:
+            new_sessions.append(session_path)
+        elif include_grown and stored >= 0:
+            _, current_count = read_session_transcript(session_path)
+            if current_count > stored:
+                new_sessions.append(session_path)
+    return new_sessions
+
+
 # ---------------------------------------------------------------------------
 # JSONL transcript extraction
 # ---------------------------------------------------------------------------
 
+# A user part that is exactly one <tag>...</tag> block is injected context.
+_WHOLE_TAG_RE = re.compile(r"^<([A-Za-z_][\w\-]*)>(.*)</\1>$", re.DOTALL)
+_UNWRAP_TAG = "send_user_message_question_reply"
+# Markdown headers Codex uses for injected context (our own memory, attached
+# file bodies, role prompts).
+_INJECTED_PREFIXES = ("# AGENTS.md", "# Files", "## Referenced", "# ROLE")
+
+
+def _clean_codex_user_part(text: str) -> str:
+    """Return the part's text if it is human content, else ''."""
+    text = text.strip()
+    m = _WHOLE_TAG_RE.match(text)
+    if m:
+        return m.group(2).strip() if m.group(1) == _UNWRAP_TAG else ""
+    if text.startswith(_INJECTED_PREFIXES):
+        return ""
+    return text
+
+
+def read_codex_transcript(path: Path) -> tuple[str, int]:
+    """
+    Parse a Codex rollout JSONL and return a (transcript, message_count) tuple,
+    in the same shape as read_session_transcript.
+
+    Keeps user input_text parts that survive the injected-context filters and
+    assistant output_text parts (commentary and final answers). Skips developer
+    messages, reasoning, tool calls and outputs, and every non-message line.
+    """
+    turns: list[str] = []
+
+    with open(path, encoding="utf-8") as f:
+        for raw_line in f:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                entry = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "response_item":
+                continue
+            payload = entry.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != "message":
+                continue
+
+            role = payload.get("role")
+            if role == "user":
+                part_type = "input_text"
+            elif role == "assistant":
+                part_type = "output_text"
+            else:
+                continue
+
+            content = payload.get("content")
+            if not isinstance(content, list):
+                continue
+            parts: list[str] = []
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != part_type:
+                    continue
+                text = part.get("text")
+                if not isinstance(text, str):
+                    continue
+                text = _clean_codex_user_part(text) if role == "user" else text.strip()
+                if text:
+                    parts.append(text)
+            if parts:
+                turns.append(f"[{role.upper()}]\n" + "\n".join(parts))
+
+    return _TURN_SEPARATOR.join(turns), len(turns)
+
+
 def read_session_transcript(path: Path) -> tuple[str, int]:
     """
-    Parse a Claude Code session JSONL and return a (transcript, message_count) tuple.
+    Parse a session JSONL and return a (transcript, message_count) tuple.
+
+    Codex rollouts (rollout-*.jsonl) are routed to read_codex_transcript; the
+    rest of this docstring describes the Claude Code format.
 
     Includes:
       - User messages that are plain strings (human-typed input)
@@ -91,6 +262,9 @@ def read_session_transcript(path: Path) -> tuple[str, int]:
       - assistant tool_use blocks
       - progress / queue-operation / file-history-snapshot / system entries
     """
+    if is_codex_rollout(path):
+        return read_codex_transcript(path)
+
     turns: list[str] = []
 
     with open(path, encoding="utf-8") as f:
