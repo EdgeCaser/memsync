@@ -280,3 +280,65 @@ class TestHarvestProjectsRoots:
         c.daemon.harvest_projects_dir = "/only"
         parsed = tomllib.loads(c._to_toml())
         assert parsed["daemon"]["harvest_projects_dir"] == "/only"
+
+
+class TestHarvestCodex:
+    def test_defaults(self, monkeypatch):
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        d = DaemonConfig()
+        assert d.harvest_codex is False
+        assert d.harvest_codex_sessions_dir == ""
+        assert d.codex_sessions_roots() == [Path("~/.codex/sessions").expanduser()]
+
+    def test_codex_home_is_honored(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "ch"))
+        assert DaemonConfig().codex_sessions_roots() == [tmp_path / "ch" / "sessions"]
+
+    def test_codex_home_is_read_at_call_time(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        d = DaemonConfig()
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        assert d.codex_sessions_roots() == [tmp_path / "sessions"]
+
+    def test_explicit_dir_beats_codex_home(self, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", "/ignored")
+        d = DaemonConfig(harvest_codex_sessions_dir="/srv/codex")
+        assert d.codex_sessions_roots() == [Path("/srv/codex")]
+
+    def test_a_list_keeps_order_and_drops_blanks_and_duplicates(self):
+        d = DaemonConfig(harvest_codex_sessions_dir=["/a", "", "/a", "  ", "/b"])
+        assert d.codex_sessions_roots() == [Path("/a"), Path("/b")]
+
+    def test_an_all_blank_list_falls_back_to_the_default(self, monkeypatch):
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        d = DaemonConfig(harvest_codex_sessions_dir=["", " "])
+        assert d.codex_sessions_roots() == [Path("~/.codex/sessions").expanduser()]
+
+    def test_projects_roots_is_unaffected(self):
+        d = DaemonConfig(harvest_codex_sessions_dir="/x")
+        assert d.projects_roots() == [Path("~/.claude/projects").expanduser()]
+
+    @pytest.mark.parametrize("value", ["/only", ["/one", "/two"]])
+    def test_round_trip_through_save_and_load(self, tmp_path, monkeypatch, value):
+        import tomllib
+        monkeypatch.setattr("memsync.config.get_config_path", lambda: tmp_path / "config.toml")
+        c = Config()
+        c.daemon.harvest_codex = True
+        c.daemon.harvest_codex_sessions_dir = value
+        c.save()
+        parsed = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+        assert parsed["daemon"]["harvest_codex"] is True
+        assert parsed["daemon"]["harvest_codex_sessions_dir"] == value
+        loaded = Config.load()
+        assert loaded.daemon.harvest_codex is True
+        assert loaded.daemon.harvest_codex_sessions_dir == value
+
+    def test_an_old_config_without_the_keys_loads_with_defaults(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("memsync.config.get_config_path", lambda: tmp_path / "config.toml")
+        (tmp_path / "config.toml").write_text(
+            '[daemon]\nenabled = true\nharvest_projects_dir = "/old"\n', encoding="utf-8"
+        )
+        loaded = Config.load()
+        assert loaded.daemon.harvest_codex is False
+        assert loaded.daemon.harvest_codex_sessions_dir == ""
+        assert loaded.daemon.projects_roots() == [Path("/old")]

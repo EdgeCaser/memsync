@@ -53,6 +53,22 @@ def _toml_str_or_list(key: str, value: str | list[str]) -> str:
     return f"{key} = [{items}]"
 
 
+def _expand_roots(raw: str | list[str]) -> list[Path]:
+    """Expand a str-or-list path setting: skip blanks, keep order, drop duplicates."""
+    entries = [raw] if isinstance(raw, str) else list(raw)
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not str(entry).strip():
+            continue
+        path = Path(str(entry)).expanduser()
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            roots.append(path)
+    return roots
+
+
 def normalize_backends(names: list[str]) -> list[str]:
     """Normalize backend aliases, drop duplicates, and skip disabled entries."""
     normalized: list[str] = []
@@ -146,6 +162,12 @@ class DaemonConfig:
     # and other machines' transcripts land on it via file sync rather than in
     # its own ~/.claude/projects.
     harvest_projects_dir: str | list[str] = ""
+    # Opt-in: also harvest Codex Desktop rollouts. Off by default so existing
+    # installs do not start reading a second transcript source unasked.
+    harvest_codex: bool = False
+    # empty = $CODEX_HOME/sessions, else ~/.codex/sessions. Accepts a list like
+    # harvest_projects_dir, for rollouts that reach this host via file sync.
+    harvest_codex_sessions_dir: str | list[str] = ""
     harvest_allow_ollama: bool = False              # unattended local LLM work can run hot
     harvest_max_runtime_seconds: int = 1800          # stop starting new sessions after 30 min
     harvest_max_sessions_per_run: int = 25           # prevent one backlog from monopolizing host
@@ -173,19 +195,22 @@ class DaemonConfig:
         preserved and duplicates are dropped, so a root listed twice — or one
         that expands to the same place as another — is swept once.
         """
-        raw = self.harvest_projects_dir
-        entries = [raw] if isinstance(raw, str) else list(raw)
-        roots: list[Path] = []
-        seen: set[str] = set()
-        for entry in entries:
-            if not str(entry).strip():
-                continue
-            path = Path(str(entry)).expanduser()
-            key = str(path)
-            if key not in seen:
-                seen.add(key)
-                roots.append(path)
-        return roots or [Path("~/.claude/projects").expanduser()]
+        return _expand_roots(self.harvest_projects_dir) or [
+            Path("~/.claude/projects").expanduser()
+        ]
+
+    def codex_sessions_roots(self) -> list[Path]:
+        """
+        Every directory the harvest should sweep for Codex rollout files.
+
+        Same shape as projects_roots(). When nothing is set the default is
+        $CODEX_HOME/sessions, read at call time, else ~/.codex/sessions.
+        """
+        roots = _expand_roots(self.harvest_codex_sessions_dir)
+        if roots:
+            return roots
+        codex_home = os.environ.get("CODEX_HOME") or "~/.codex"
+        return [Path(codex_home).expanduser() / "sessions"]
 
 
 @dataclass
@@ -314,6 +339,8 @@ class Config:
             harvest_enabled=daemon_raw.get("harvest_enabled", True),
             harvest_schedule=daemon_raw.get("harvest_schedule", "0 2 * * *"),
             harvest_projects_dir=daemon_raw.get("harvest_projects_dir", ""),
+            harvest_codex=daemon_raw.get("harvest_codex", False),
+            harvest_codex_sessions_dir=daemon_raw.get("harvest_codex_sessions_dir", ""),
             harvest_allow_ollama=daemon_raw.get("harvest_allow_ollama", False),
             harvest_max_runtime_seconds=daemon_raw.get("harvest_max_runtime_seconds", 1800),
             harvest_max_sessions_per_run=daemon_raw.get("harvest_max_sessions_per_run", 25),
@@ -515,6 +542,8 @@ class Config:
                 f"harvest_enabled = {str(d.harvest_enabled).lower()}",
                 f'harvest_schedule = "{d.harvest_schedule}"',
                 _toml_str_or_list("harvest_projects_dir", d.harvest_projects_dir),
+                f"harvest_codex = {str(d.harvest_codex).lower()}",
+                _toml_str_or_list("harvest_codex_sessions_dir", d.harvest_codex_sessions_dir),
                 f"harvest_allow_ollama = {str(d.harvest_allow_ollama).lower()}",
                 f"harvest_max_runtime_seconds = {d.harvest_max_runtime_seconds}",
                 f"harvest_max_sessions_per_run = {d.harvest_max_sessions_per_run}",
